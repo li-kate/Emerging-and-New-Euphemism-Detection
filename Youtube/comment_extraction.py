@@ -6,120 +6,136 @@ import torch
 import os
 from sentence_transformers import SentenceTransformer, util
 from googleapiclient.discovery import build
+from datetime import datetime
 
 # --- INITIALIZATION ---
-API_KEY = 'AIzaSyAFHTcRHuSEnhlniS7xyjzZT_gXP7oO4Gs'
-youtube = build('youtube', 'v3', developerKey=API_KEY)
-model = SentenceTransformer('all-MiniLM-L6-v2')
+# 1. Replace with your actual YouTube API Key
+API_KEY = 'AIzaSyAFHTcRHuSEnhlniS7xyjzZT_gXP7oO4Gs' 
 
-# --- ORGANIZED TABOO TOPICS ---
-# Grouped to maximize search relevancy on YouTube
+# 2. Setup YouTube API and AI Model
+print("Loading Machine Learning Model... (This takes a moment on the first run)")
+model = SentenceTransformer('all-MiniLM-L6-v2')
+youtube = build('youtube', 'v3', developerKey=API_KEY)
+demoji.download_codes()
+print("Model Loaded. Starting Research Pipeline...")
+
+# --- TABOO TOPICS ---
 TABOO_CLUSTERS = {
     "Substances": ["drugs addiction heroin", "cocaine overdose", "alcohol drunk hangover"],
     "Sexuality": ["sex pregnancy prostitution", "pornography masturbation genitals", "orgasm erection"],
     "Mortality": ["death funeral suicide", "kill euthanasia murder"],
-    "Medical_Conditions": ["disease cancer terminal illness", "dementia venereal disease", "mental illness psychotic schizophrenia"],
-    "Bodily_Functions": ["urinate defecate vomit", "flatulence blood semen", "toilet diarrhea menstruation"],
-    "Physical_State": ["injury wound amputation", "disabled blind deaf", "fat obese ugly bald body odor"],
-    "Socio_Economic": ["poverty wealth bankrupt", "debt homeless eviction", "fired laid off illiterate expelled"],
-    "Crime_Conflict": ["crime theft prison", "bribery corruption propaganda", "war bombing civilian death", "torture genocide"],
-    "Social_Issues": ["racism segregation discrimination", "immigrant refugee deportation", "violence riot assault rape"],
-    "Personal_Relational": ["anger depression anxiety", "grief divorce abuse", "domestic violence abandonment", "infidelity cheating rejection"]
+    "Medical": ["disease cancer terminal illness", "dementia venereal disease", "mental illness psychotic schizophrenia"],
+    "Bodily": ["urinate defecate vomit", "flatulence blood semen", "toilet diarrhea menstruation"],
+    "Physical": ["injury wound amputation", "disabled blind deaf", "fat obese ugly bald body odor"],
+    "Economic": ["poverty wealth bankrupt", "debt homeless eviction", "fired laid off illiterate expelled"],
+    "Conflict": ["crime theft prison", "bribery corruption propaganda", "war bombing civilian death", "torture genocide"],
+    "Social": ["racism segregation discrimination", "immigrant refugee deportation", "violence riot assault rape"],
+    "Personal": ["anger depression anxiety", "grief divorce abuse", "domestic violence abandonment", "infidelity cheating rejection"]
 }
 
-# Flattened list for similarity checking
-ALL_TABOO_WORDS = [word for sublist in [q.split() for cluster in TABOO_CLUSTERS.values() for q in cluster] for word in sublist]
-TABOO_VECTORS = model.encode(ALL_TABOO_WORDS, convert_to_tensor=True)
+# Flatten list for whole-word checking
+ALL_TABOO_WORDS = set([word for sublist in [q.split() for cluster in TABOO_CLUSTERS.values() for q in cluster] for word in sublist])
+TABOO_VECTORS = model.encode(list(ALL_TABOO_WORDS), convert_to_tensor=True)
+
+# Basic Stopwords to filter out "the", "and", etc., during Discovery
+STOPWORDS = {"the", "and", "this", "that", "with", "from", "they", "have", "been", "would", "about", "their", "there", "what", "some"}
 
 def clean_text(text):
-    """Sanitizes text and converts emojis for model readability."""
+    """Sanitizes text and converts emojis to descriptors."""
     text = html.unescape(text)
     text = demoji.replace_with_desc(text, sep=":")
     text = re.sub(r'<[^>]+>', ' ', text)
     text = re.sub(r'http\S+', '', text)
     return " ".join(text.split()).lower()
 
-print("Loading Machine Learning Model... (This may take a minute on the first run)")
-model = SentenceTransformer('all-MiniLM-L6-v2')
-print("Model Loaded. Starting YouTube Search...")
-
-def get_data():
-    """PASS 1: Data Collection & Semantic Scoring"""
+def run_extraction():
     all_comments = []
     
+    # --- DATA COLLECTION ---
     for category, queries in TABOO_CLUSTERS.items():
         for query in queries:
-            print(f"Searching: {category} -> {query}")
+            print(f"Collecting: {query}...")
             try:
-                # Search for videos
-                search_req = youtube.search().list(
-                    q=query, part="snippet", type="video", maxResults=5
-                ).execute()
-                
-                for v in search_req['items']:
-                    v_id = v['id']['videoId']
-                    v_title = v['snippet']['title']
+                search = youtube.search().list(q=query, part="snippet", type="video", maxResults=5).execute()
+                for v in search['items']:
+                    v_id, v_title = v['id']['videoId'], v['snippet']['title']
                     
-                    # Fetch comments
-                    comment_req = youtube.commentThreads().list(
-                        part="snippet", videoId=v_id, maxResults=100, textFormat="plainText"
-                    ).execute()
-                    
-                    for item in comment_req['items']:
-                        c = item['snippet']['topLevelComment']['snippet']
-                        raw_text = c['textDisplay']
-                        clean = clean_text(raw_text)
-                        
-                        if len(clean) > 10:
-                            # Calculate Similarity
-                            comment_vec = model.encode(clean, convert_to_tensor=True)
-                            scores = util.cos_sim(comment_vec, TABOO_VECTORS)
-                            max_score = torch.max(scores).item()
-                            
-                            # Check if it's a euphemism (High similarity but no taboo words used)
-                            has_taboo = any(t in clean for t in ALL_TABOO_WORDS)
-                            is_euphemism = (max_score > 0.6) and not has_taboo
-                            
-                            all_comments.append({
-                                'category': category,
-                                'video_title': v_title,
-                                'content': clean,
-                                'similarity_score': round(max_score, 4),
-                                'is_euphemism': is_euphemism,
-                                'timestamp': c['publishedAt'],
-                                'author_id': c.get('authorChannelId', {}).get('value', 'unknown')
-                            })
-            except Exception as e:
-                print(f"Error skipping: {e}")
-                continue
-                
-    return all_comments
+                    try:
+                        comments = youtube.commentThreads().list(part="snippet", videoId=v_id, maxResults=100, textFormat="plainText").execute()
+                        for item in comments['items']:
+                            c = item['snippet']['topLevelComment']['snippet']
+                            clean = clean_text(c['textDisplay'])
+                            if len(clean) > 10:
+                                all_comments.append({
+                                    'category': category,
+                                    'video_title': v_title,
+                                    'content': clean,
+                                    'timestamp': pd.to_datetime(c['publishedAt']),
+                                    'author_id': c.get('authorChannelId', {}).get('value', 'unknown')
+                                })
+                    except: continue
+            except: continue
 
-def process_results(data_list):
-    """PASS 2: Chronological Analysis & First-Time Detection"""
-    df = pd.DataFrame(data_list)
-    if df.empty: return df
+    df = pd.DataFrame(all_comments)
+    if df.empty: return print("No data collected. Check API key/quota.")
+
+    # --- PASS 1: DISCOVERY (2010s & 2020s) ---
+    print("Running Pass 1: Discovering Euphemisms in 2010-2026 data...")
+    modern_df = df[df['timestamp'].dt.year >= 2010].copy()
     
-    # Sort by time to track origin
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    # Encode all modern comments at once for speed
+    contents = modern_df['content'].tolist()
+    content_vecs = model.encode(contents, convert_to_tensor=True, show_progress_bar=True)
+    
+    discovered_words = set()
+    
+    for i, vec in enumerate(content_vecs):
+        scores = util.cos_sim(vec, TABOO_VECTORS)
+        max_score = torch.max(scores).item()
+        text = contents[i]
+        
+        # Whole-word taboo check
+        has_taboo = any(re.search(rf'\b{re.escape(t)}\b', text) for t in ALL_TABOO_WORDS)
+        
+        # If conceptually taboo but words are missing -> Extract new words
+        if max_score > 0.45 and not has_taboo:
+            # Tokenize and find unique words not in taboo list or stopwords
+            words = re.findall(r'\b[a-z]{4,}\b', text) # Only words 4+ letters long
+            for w in words:
+                if w not in ALL_TABOO_WORDS and w not in STOPWORDS:
+                    discovered_words.add(w)
+
+    print(f"Discovered {len(discovered_words)} candidate euphemism words.")
+
+    # --- PASS 2: DETECTION (Everything) ---
+    print("Running Pass 2: Tagging all instances across all time periods...")
     df = df.sort_values('timestamp')
     
-    # Track the first time a specific semantic pattern (euphemism) appears
-    seen_content = set()
-    first_time_flags = []
-    
-    for _, row in df.iterrows():
-        if row['is_euphemism'] and row['content'] not in seen_content:
-            first_time_flags.append(True)
-            seen_content.add(row['content'])
-        else:
-            first_time_flags.append(False)
-            
-    df['is_first_time_appearance'] = first_time_flags
-    return df
+    is_euphemism_list = []
+    first_time_list = []
+    seen_euphemisms = set()
 
-# --- EXECUTION ---
-raw_results = get_data()
-final_df = process_results(raw_results)
-final_df.to_csv("taboo_research_dataset.csv", index=False)
-print(f"Dataset complete. Saved {len(final_df)} rows to taboo_research_dataset.csv")
+    for _, row in df.iterrows():
+        text = row['content']
+        # Find if any discovered word is in this comment
+        found_words = [w for w in discovered_words if re.search(rf'\b{re.escape(w)}\b', text)]
+        
+        if found_words:
+            is_euphemism_list.append(True)
+            # Mark 'First Time' if any of these words are new to the memory
+            is_new = any(w not in seen_euphemisms for w in found_words)
+            first_time_list.append(is_new)
+            for w in found_words: seen_euphemisms.add(w)
+        else:
+            is_euphemism_list.append(False)
+            first_time_list.append(False)
+
+    df['is_euphemism'] = is_euphemism_list
+    df['is_first_time_appearance'] = first_time_list
+    
+    # Save results
+    df.to_csv("final_euphemism_research.csv", index=False)
+    print(f"Success! Saved {len(df)} rows to final_euphemism_research.csv")
+
+# Run the full pipeline
+run_extraction()
