@@ -8,16 +8,6 @@ The main pipeline consumes these uniformly regardless of origin.
 
 Filtering:
     - Language: English-only by default, using fasttext-langdetect for speed.
-      Why fasttext over langdetect or spacy?
-        * fasttext: ~1M sentences/sec, 99%+ accuracy on sentences >10 words.
-          Single model file (~1MB compressed). Best speed/accuracy tradeoff.
-        * langdetect (Google): ~10K sentences/sec, good accuracy but 100x slower.
-          Fine for small corpora, unusable at Common Crawl scale.
-        * spaCy: Requires loading a full NLP pipeline just for lang ID.
-          Overkill and slow for this single task.
-      The trade-off: fasttext needs a model download on first run (~1MB).
-      We handle this automatically.
-
     - Temporal: Each source filters by a (start_year, end_year) range.
       Timestamps come from different sources with different semantics:
         * Common Crawl: WARC-Date is the CRAWL date, not publication date.
@@ -111,15 +101,7 @@ DEFAULT_SOURCE_CONFIG = SourceConfig()
 #
 # We use fasttext's compressed language ID model (lid.176.ftz, ~1MB).
 # It supports 176 languages and runs at ~1M predictions/sec on CPU.
-#
-# Alternative considered: the `langdetect` library (Google's port).
-#   Pros: No model download needed, pure Python.
-#   Cons: ~100x slower. At Common Crawl scale (billions of sentences),
-#         this is the difference between hours and weeks.
-#
-# The fasttext model is downloaded once and cached. If you're in an
-# environment without internet access, pre-download the model and set
-# the path via the FASTTEXT_LANGID_MODEL env var.
+# The fasttext model is downloaded once and cached.
 #
 # Required: pip install fasttext-langdetect
 #           (or: pip install fasttext, then download model manually)

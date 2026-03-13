@@ -67,48 +67,10 @@ class PipelineConfig:
 
     # --- Anchor preparation ---
     # EXPERIMENT: Template wrapping
-    #
-    # Why this matters:
-    #   Sentence embedders were trained on sentences, not isolated words.
-    #   Embedding the bare word "death" produces a less stable vector than
-    #   embedding "the taboo topic of death" because the model has more
-    #   context to work with. The template nudges the anchor vector into
-    #   the right semantic region.
-    #
-    # Options:
-    #   "none"      -> embed raw: "death"
-    #   "taboo"     -> embed: "the taboo topic of death"
-    #   "euphemism" -> embed: "a euphemism for death"
-    #
-    # Hypothesis: "taboo" should outperform "none" because it adds context.
-    # "euphemism" might overshoot — it could pull the anchor toward the
-    # euphemism region itself, making it harder to detect euphemisms that
-    # are semantically distant (which are the interesting ones).
     anchor_template: str = "none"
 
     # --- Context window ---
     # EXPERIMENT: How much text to embed around each position
-    #
-    # Why this matters:
-    #   Full sentences dilute the euphemistic signal. A sentence with 20
-    #   words where 1 is a euphemism means that word contributes ~5% of
-    #   the embedding. A ±5 word window (11 words) means it contributes ~9%.
-    #   But too narrow a window loses discourse cues (hedging, topic framing).
-    #
-    # Options:
-    #   None  -> embed the full sentence as-is (original behavior)
-    #   3     -> embed ±3 words around each word (7-word windows)
-    #   5     -> embed ±5 words (11-word windows)
-    #   10    -> embed ±10 words (21-word windows)
-    #
-    # Implementation: For each sentence, generate overlapping windows
-    # centered on each word. Each window is embedded separately. This is
-    # more expensive (N windows per sentence vs 1 embedding) but gives
-    # much better localization of the euphemistic term.
-    #
-    # Trade-off: cost scales linearly with sentence length.
-    # Mitigation: Only run windowed mode on sentences that FIRST pass the
-    # full-sentence filter (two-stage approach).
     context_window_size: Optional[int] = None  # None = full sentence
 
     # When using windows, we can skip the full-sentence pre-filter or use it.
@@ -119,37 +81,16 @@ class PipelineConfig:
 
     # --- FAISS search ---
     # EXPERIMENT: k=1 vs k=5
-    #
-    # Why k>1 matters:
-    #   A euphemism might be equidistant between two taboo anchors.
-    #   "escort" matches both "prostitution" and general "companion" concepts.
-    #   k=5 costs almost nothing extra (FAISS already computed the distances)
-    #   and gives richer output for analysis.
-    #
-    # For the paper: k=5 with threshold filtering is strictly better than k=1.
-    # k=1 is only worth testing to show this empirically.
     faiss_k: int = 5
     use_gpu_faiss: bool = True
 
     # --- Thresholds ---
     # EXPERIMENT: Global vs per-category
-    #
-    # Why per-category matters:
-    #   Different taboo domains have different euphemism "distances" in
-    #   embedding space. Profanity minced oaths ("fudge" for "fuck") are
-    #   quite distant. Death euphemisms ("passed away") are closer.
-    #   A single global threshold either misses distant euphemisms (too high)
-    #   or floods you with false positives (too low).
     global_threshold: float = 0.65
     use_per_category_thresholds: bool = False
 
     # --- Phrase extraction ---
-    # METHOD CHOICE: perturbation vs contrastive masking
-    #
-    # See detailed analysis in the section 4 docstrings below.
-    # Summary: perturbation is the recommended default. Contrastive masking
-    # is included as a variant for experimental comparison.
-    #
+    # METHOD CHOICE: perturbation
     # "perturbation"        -> remove n-grams, measure similarity drop
     # "contrastive_masking" -> replace n-grams with [MASK], measure drop
     phrase_method: str = "perturbation"
