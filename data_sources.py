@@ -746,12 +746,13 @@ _TEXT_COLUMN_NAMES = [
     "text", "body", "content", "snippet", "comment", "message",
     "post", "tweet", "review", "description", "sentence", "utterance",
     "response", "question", "title_and_body", "selftext", "full_text",
+    "plain_text"
 ]
 
 _TIMESTAMP_COLUMN_NAMES = [
     "timestamp", "date", "time", "created_at", "created_utc",
     "published_at", "datetime", "post_date", "created", "updated_at",
-    "pub_date", "publication_date", "posted_at", "sent_at",
+    "published_date", "publication_date", "posted_at", "sent_at",
 ]
 
 _SOURCE_COLUMN_NAMES = [
