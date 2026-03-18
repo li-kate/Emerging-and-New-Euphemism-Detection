@@ -8,6 +8,16 @@ The main pipeline consumes these uniformly regardless of origin.
 
 Filtering:
     - Language: English-only by default, using fasttext-langdetect for speed.
+      Why fasttext over langdetect or spacy?
+        * fasttext: ~1M sentences/sec, 99%+ accuracy on sentences >10 words.
+          Single model file (~1MB compressed). Best speed/accuracy tradeoff.
+        * langdetect (Google): ~10K sentences/sec, good accuracy but 100x slower.
+          Fine for small corpora, unusable at Common Crawl scale.
+        * spaCy: Requires loading a full NLP pipeline just for lang ID.
+          Overkill and slow for this single task.
+      The trade-off: fasttext needs a model download on first run (~1MB).
+      We handle this automatically.
+
     - Temporal: Each source filters by a (start_year, end_year) range.
       Timestamps come from different sources with different semantics:
         * Common Crawl: WARC-Date is the CRAWL date, not publication date.
@@ -29,6 +39,7 @@ Adding a new source:
 import re
 import io
 import json
+import os
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -101,7 +112,15 @@ DEFAULT_SOURCE_CONFIG = SourceConfig()
 #
 # We use fasttext's compressed language ID model (lid.176.ftz, ~1MB).
 # It supports 176 languages and runs at ~1M predictions/sec on CPU.
-# The fasttext model is downloaded once and cached.
+#
+# Alternative considered: the `langdetect` library (Google's port).
+#   Pros: No model download needed, pure Python.
+#   Cons: ~100x slower. At Common Crawl scale (billions of sentences),
+#         this is the difference between hours and weeks.
+#
+# The fasttext model is downloaded once and cached. If you're in an
+# environment without internet access, pre-download the model and set
+# the path via the FASTTEXT_LANGID_MODEL env var.
 #
 # Required: pip install fasttext-langdetect
 #           (or: pip install fasttext, then download model manually)
@@ -693,6 +712,275 @@ def stream_news_dump(
 # GENERIC LOCAL FILE (for testing)
 # ============================================================================
 
+# ============================================================================
+# CSV / TSV FILES
+# ============================================================================
+#
+# Why this source matters:
+#   Many pre-collected datasets come as CSVs: API exports from Twitter/Reddit,
+#   annotated corpora from prior research, scraped data saved to tabular format,
+#   exported Slack/Discord logs, survey responses, etc.
+#
+#   The challenge is that CSV schemas vary wildly. Some have a "text" column,
+#   others have "body", "content", "snippet", "comment", "message", etc.
+#   Same for timestamps: "timestamp", "date", "created_at", "time",
+#   "published_at", "created_utc", etc.
+#
+#   Rather than hardcoding column names, we accept explicit column names
+#   and also auto-detect common ones as a fallback.
+#
+# Multi-sentence handling:
+#   A CSV cell might contain a full paragraph or multiple sentences.
+#   We split on sentence boundaries (like other sources) so each TextRecord
+#   is one sentence. The original cell text is not preserved — if you need
+#   it, use the source_url field (which stores the row index).
+#
+# Encoding:
+#   CSVs from the wild are often not UTF-8. We try UTF-8 first, then fall
+#   back to latin-1 (which never fails but may garble non-Latin characters).
+#   For known encodings, pass encoding= explicitly.
+# ============================================================================
+
+# Common column name patterns for auto-detection
+_TEXT_COLUMN_NAMES = [
+    "text", "body", "content", "snippet", "comment", "message",
+    "post", "tweet", "review", "description", "sentence", "utterance",
+    "response", "question", "title_and_body", "selftext", "full_text",
+    "context"
+]
+
+_TIMESTAMP_COLUMN_NAMES = [
+    "timestamp", "date", "time", "created_at", "created_utc",
+    "published_at", "datetime", "post_date", "created", "updated_at",
+    "pub_date", "publication_date", "posted_at", "sent_at",
+]
+
+_SOURCE_COLUMN_NAMES = [
+    "url", "source_url", "link", "permalink"
+]
+
+
+def _detect_column(
+    columns: list[str],
+    candidates: list[str],
+    label: str,
+) -> Optional[str]:
+    """
+    Auto-detect a column by matching against known common names.
+    Case-insensitive, strips whitespace.
+
+    Returns the matched column name or None.
+    """
+    col_map = {c.strip().lower(): c for c in columns}
+
+    # Exact match first
+    for candidate in candidates:
+        if candidate.lower() in col_map:
+            return col_map[candidate.lower()]
+
+    # Substring match as fallback (e.g., "comment_text" contains "text")
+    for candidate in candidates:
+        for col_lower, col_original in col_map.items():
+            if candidate.lower() in col_lower:
+                return col_original
+
+    return None
+
+
+def stream_csv(
+    path: str,
+    text_column: Optional[str] = None,
+    timestamp_column: Optional[str] = None,
+    source_url_column: Optional[str] = None,
+    source_name: Optional[str] = None,
+    delimiter: Optional[str] = None,
+    encoding: str = "utf-8",
+    config: SourceConfig = DEFAULT_SOURCE_CONFIG,
+) -> Iterator[TextRecord]:
+    """
+    Stream sentences from a CSV or TSV file.
+
+    Column detection priority:
+        1. Explicit column name passed as argument (highest priority)
+        2. Auto-detection from common column name patterns
+        3. For text: if only one non-numeric column exists, use it
+        4. Raise an error if text column can't be determined
+
+    Args:
+        path:               Path to CSV/TSV file
+        text_column:        Name of the text/content column. Auto-detected if None.
+        timestamp_column:   Name of the timestamp column. Auto-detected if None.
+                            If no timestamp column found, records get empty timestamps
+                            (temporal filtering is skipped, records are included).
+        source_url_column:  Name of the URL/source column. Auto-detected if None.
+        source_name:        Label for the source field. Defaults to filename.
+        delimiter:          CSV delimiter. Auto-detected if None (tries comma, tab, pipe).
+        encoding:           File encoding. Defaults to UTF-8 with latin-1 fallback.
+        config:             Filtering configuration (language, temporal, length).
+
+    Yields:
+        TextRecord objects, one per sentence extracted from each row.
+    """
+    import csv
+    import os
+
+    if source_name is None:
+        source_name = os.path.basename(path)
+
+    # --- Read file with encoding fallback ---
+    def open_file():
+        try:
+            return open(path, "r", encoding=encoding, newline="")
+        except UnicodeDecodeError:
+            logger.warning(f"UTF-8 failed for {path}, falling back to latin-1")
+            return open(path, "r", encoding="latin-1", newline="")
+
+    # --- Detect delimiter ---
+    if delimiter is None:
+        with open_file() as f:
+            sample = f.read(8192)
+            try:
+                dialect = csv.Sniffer().sniff(sample, delimiters=",\t|;")
+                delimiter = dialect.delimiter
+            except csv.Error:
+                delimiter = ","  # default fallback
+        logger.info(f"Auto-detected delimiter: {repr(delimiter)}")
+
+    # --- Read header and detect columns ---
+    with open_file() as f:
+        reader = csv.DictReader(f, delimiter=delimiter)
+        columns = reader.fieldnames or []
+
+        if not columns:
+            logger.error(f"No columns found in {path}")
+            return
+
+        logger.info(f"CSV columns: {columns}")
+
+        # Detect text column
+        resolved_text_col = text_column
+        if resolved_text_col is None:
+            resolved_text_col = _detect_column(columns, _TEXT_COLUMN_NAMES, "text")
+        if resolved_text_col is None:
+            # Last resort: if there's only one non-numeric-looking column, use it
+            non_numeric = [c for c in columns if not c.strip().lower().startswith(("id", "num", "count", "index"))]
+            if len(non_numeric) == 1:
+                resolved_text_col = non_numeric[0]
+        if resolved_text_col is None:
+            logger.error(
+                f"Could not detect text column in {path}. "
+                f"Columns: {columns}. "
+                f"Pass text_column= explicitly."
+            )
+            return
+
+        # Detect timestamp column
+        resolved_ts_col = timestamp_column
+        if resolved_ts_col is None:
+            resolved_ts_col = _detect_column(columns, _TIMESTAMP_COLUMN_NAMES, "timestamp")
+        if resolved_ts_col is None:
+            logger.info(f"No timestamp column detected in {path}. Temporal filtering skipped.")
+
+        # Detect source URL column
+        resolved_url_col = source_url_column
+        if resolved_url_col is None:
+            resolved_url_col = _detect_column(columns, _SOURCE_COLUMN_NAMES, "source_url")
+
+        logger.info(
+            f"Using columns — text: {resolved_text_col}, "
+            f"timestamp: {resolved_ts_col}, "
+            f"source_url: {resolved_url_col}"
+        )
+
+        # --- Stream rows ---
+        row_count = 0
+        yielded_count = 0
+
+        for row in reader:
+            row_count += 1
+
+            text = (row.get(resolved_text_col) or "").strip()
+            if not text:
+                continue
+
+            timestamp = ""
+            if resolved_ts_col:
+                timestamp = (row.get(resolved_ts_col) or "").strip()
+
+            source_url = ""
+            if resolved_url_col:
+                source_url = (row.get(resolved_url_col) or "").strip()
+
+            # Clean the text
+            text = clean_text(text)
+            if not text:
+                continue
+
+            # Split into sentences (a CSV cell may contain paragraphs)
+            sentences = re.split(r"(?<=[.!?])\s+", text)
+
+            for sentence in sentences:
+                sentence = sentence.strip()
+                if not sentence:
+                    continue
+
+                if filter_record(sentence, timestamp, config):
+                    yielded_count += 1
+                    yield TextRecord(
+                        text=sentence,
+                        timestamp=timestamp,
+                        source_url=source_url or f"{path}:row_{row_count}",
+                        source=source_name,
+                    )
+
+        logger.info(
+            f"CSV {path}: {row_count} rows read, "
+            f"{yielded_count} sentences yielded"
+        )
+
+
+def stream_csv_directory(
+    directory: str,
+    text_column: Optional[str] = None,
+    timestamp_column: Optional[str] = None,
+    source_url_column: Optional[str] = None,
+    source_name: Optional[str] = None,
+    config: SourceConfig = DEFAULT_SOURCE_CONFIG,
+    glob_pattern: str = "*.csv",
+) -> Iterator[TextRecord]:
+    """
+    Stream from all CSV files in a directory.
+
+    Args:
+        directory:    Path to directory containing CSV files
+        glob_pattern: File pattern to match. "*.csv" for CSVs, "*.tsv" for TSVs,
+                      "*.csv,*.tsv" won't work — use "*.csv" and "*.tsv" separately
+                      or "*.*sv" for both.
+        (other args): Passed through to stream_csv(). If None, auto-detected
+                      independently for each file (since schemas may differ).
+    """
+    import os
+    import glob as globmod
+
+    files = sorted(globmod.glob(os.path.join(directory, glob_pattern)))
+    if not files:
+        logger.warning(f"No files matching {glob_pattern} in {directory}")
+        return
+
+    logger.info(f"Found {len(files)} CSV files in {directory}")
+
+    for filepath in files:
+        logger.info(f"Processing: {os.path.basename(filepath)}")
+        yield from stream_csv(
+            filepath,
+            text_column=text_column,
+            timestamp_column=timestamp_column,
+            source_url_column=source_url_column,
+            source_name=source_name or os.path.basename(filepath),
+            config=config,
+        )
+
+
 def stream_text_file(
     path: str,
     source_name: str = "local",
@@ -764,6 +1052,51 @@ def stream_reddit_directory(
         yield from stream_reddit_dump(filepath, config=config, subreddits=subreddits)
 
 
+def download_wet_paths(
+    crawl_id: str,
+    cache_dir: str = "./cc_cache",
+) -> str:
+    """
+    Download and cache the WET file paths index for a Common Crawl crawl.
+
+    Each crawl (~1 month of the web) has ~90,000 WET files listed in
+    a gzipped index file. This downloads that index once and caches it
+    locally so you don't re-download on every run.
+
+    Args:
+        crawl_id:  Crawl identifier, e.g. "CC-MAIN-2024-10"
+                   Full list: https://index.commoncrawl.org/collinfo.json
+        cache_dir: Directory to cache the paths file
+
+    Returns:
+        Path to the local uncompressed paths file
+    """
+    import gzip
+    import requests as req
+
+    os.makedirs(cache_dir, exist_ok=True)
+    local_path = os.path.join(cache_dir, f"{crawl_id}_wet_paths.txt")
+
+    if os.path.exists(local_path):
+        logger.info(f"Using cached WET paths: {local_path}")
+        return local_path
+
+    url = f"https://data.commoncrawl.org/crawl-data/{crawl_id}/wet.paths.gz"
+    logger.info(f"Downloading WET paths index from {url}...")
+
+    response = req.get(url)
+    response.raise_for_status()
+
+    content = gzip.decompress(response.content).decode("utf-8")
+    with open(local_path, "w") as f:
+        f.write(content)
+
+    line_count = len(content.strip().split("\n"))
+    logger.info(f"Downloaded {line_count} WET file paths -> {local_path}")
+
+    return local_path
+
+
 def stream_common_crawl_wet_list(
     wet_paths_file: str,
     base_url: str = "https://data.commoncrawl.org/",
@@ -775,7 +1108,7 @@ def stream_common_crawl_wet_list(
 
     Args:
         wet_paths_file: Path to a local file listing WET paths (one per line).
-                        Download from: CC-MAIN-YYYY-WW/wet.paths.gz
+                        Get this via download_wet_paths().
         base_url:       Base URL to prepend to each path
         config:         Filtering configuration
         max_files:      Stop after processing this many files (for testing).
@@ -790,5 +1123,31 @@ def stream_common_crawl_wet_list(
         if max_files is not None and i >= max_files:
             break
         url = base_url + path
-        logger.info(f"Processing WET file {i+1}/{len(paths)}: {path}")
+        logger.info(f"Processing WET file {i+1}/{min(max_files or len(paths), len(paths))}: {path}")
         yield from stream_common_crawl_wet(url, config=config)
+
+
+def stream_common_crawl(
+    crawl_id: str,
+    max_files: int = 1,
+    config: SourceConfig = DEFAULT_SOURCE_CONFIG,
+    cache_dir: str = "./cc_cache",
+) -> Iterator[TextRecord]:
+    """
+    Convenience function: download the WET index and stream in one call.
+
+    This is the simplest way to get Common Crawl data into the pipeline.
+
+    Args:
+        crawl_id:   e.g. "CC-MAIN-2024-10"
+        max_files:  How many WET files to process (1 for testing, 10+ for real)
+        config:     Filtering configuration
+        cache_dir:  Where to cache the paths index
+
+    Example:
+        sources = [stream_common_crawl("CC-MAIN-2024-10", max_files=1, config=cfg)]
+    """
+    paths_file = download_wet_paths(crawl_id, cache_dir)
+    yield from stream_common_crawl_wet_list(
+        paths_file, config=config, max_files=max_files,
+    )
