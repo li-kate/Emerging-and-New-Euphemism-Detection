@@ -746,7 +746,6 @@ _TEXT_COLUMN_NAMES = [
     "text", "body", "content", "snippet", "comment", "message",
     "post", "tweet", "review", "description", "sentence", "utterance",
     "response", "question", "title_and_body", "selftext", "full_text",
-    "context"
 ]
 
 _TIMESTAMP_COLUMN_NAMES = [
@@ -756,7 +755,7 @@ _TIMESTAMP_COLUMN_NAMES = [
 ]
 
 _SOURCE_COLUMN_NAMES = [
-    "url", "source_url", "link", "permalink"
+    "url", "source_url", "link", "permalink", "source", "uri",
 ]
 
 
@@ -796,6 +795,8 @@ def stream_csv(
     delimiter: Optional[str] = None,
     encoding: str = "utf-8",
     config: SourceConfig = DEFAULT_SOURCE_CONFIG,
+    task_id: int = 0,
+    num_tasks: int = 1,
 ) -> Iterator[TextRecord]:
     """
     Stream sentences from a CSV or TSV file.
@@ -806,17 +807,28 @@ def stream_csv(
         3. For text: if only one non-numeric column exists, use it
         4. Raise an error if text column can't be determined
 
+    Row-level sharding (for SLURM arrays):
+        When num_tasks > 1, each task processes every num_tasks-th row
+        starting at task_id. This lets you parallelize a single large CSV
+        across multiple SLURM array tasks.
+
+        Example with num_tasks=4:
+            task 0: rows 0, 4, 8, 12, ...
+            task 1: rows 1, 5, 9, 13, ...
+            task 2: rows 2, 6, 10, 14, ...
+            task 3: rows 3, 7, 11, 15, ...
+
     Args:
         path:               Path to CSV/TSV file
         text_column:        Name of the text/content column. Auto-detected if None.
         timestamp_column:   Name of the timestamp column. Auto-detected if None.
-                            If no timestamp column found, records get empty timestamps
-                            (temporal filtering is skipped, records are included).
         source_url_column:  Name of the URL/source column. Auto-detected if None.
         source_name:        Label for the source field. Defaults to filename.
-        delimiter:          CSV delimiter. Auto-detected if None (tries comma, tab, pipe).
+        delimiter:          CSV delimiter. Auto-detected if None.
         encoding:           File encoding. Defaults to UTF-8 with latin-1 fallback.
         config:             Filtering configuration (language, temporal, length).
+        task_id:            SLURM array task index (0-based). Default 0.
+        num_tasks:          Total number of SLURM array tasks. Default 1 (no sharding).
 
     Yields:
         TextRecord objects, one per sentence extracted from each row.
@@ -897,6 +909,11 @@ def stream_csv(
         yielded_count = 0
 
         for row in reader:
+            # Row-level sharding for SLURM parallelism
+            if num_tasks > 1 and (row_count % num_tasks) != task_id:
+                row_count += 1
+                continue
+
             row_count += 1
 
             text = (row.get(resolved_text_col) or "").strip()
@@ -933,8 +950,9 @@ def stream_csv(
                         source=source_name,
                     )
 
+        shard_info = f" (task {task_id}/{num_tasks})" if num_tasks > 1 else ""
         logger.info(
-            f"CSV {path}: {row_count} rows read, "
+            f"CSV {path}{shard_info}: {row_count} rows read, "
             f"{yielded_count} sentences yielded"
         )
 
