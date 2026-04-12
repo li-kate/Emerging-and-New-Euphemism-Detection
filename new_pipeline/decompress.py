@@ -92,7 +92,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("input", help="Input .zst file")
     parser.add_argument("--output-dir", default="./split/")
-    parser.add_argument("--max-lines", type=int, default=5_000_000,
+    parser.add_argument("--max-lines", type=int, default=2_000_000_000,
                         help="Max lines per output file")
     parser.add_argument("--compression-level", type=int, default=3)
     args = parser.parse_args()

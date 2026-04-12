@@ -13,32 +13,32 @@ The temporal analysis (Stage 2) determines which are which.
 Usage:
     # Reddit per-subreddit dumps
     python collect_instances.py \
-        --words drug_words.txt anchors_and_baselines.txt comparison_words.txt \
+        --words euphemisms.txt taboo_keywords.txt comparison_words.txt \
         --reddit-dir ./reddit_dumps/ \
         --output ./matches/reddit_matches.jsonl
 
     # Reddit monthly dumps (full scan)
     python collect_instances.py \
-        --words drug_words.txt anchors_and_baselines.txt comparison_words.txt \
-        --reddit-monthly-dir ./reddit_dumps/ \
+        --words euphemisms.txt \
+        --reddit-monthly-dir ./monthly_dumps/ \
         --output ./matches/full_reddit_matches.jsonl
 
     # CSV files
     python collect_instances.py \
-        --words drug_words.txt anchors_and_baselines.txt comparison_words.txt \
+        --words euphemisms.txt \
         --csv-dir ./csv_data/ \
         --output ./matches/csv_matches.jsonl
 
     # Single Reddit file (for testing)
     python collect_instances.py \
-        --words drug_words.txt anchors_and_baselines.txt comparison_words.txt \
+        --words euphemisms.txt \
         --reddit-file ./RC_2020-01.zst \
         --output ./matches/test_matches.jsonl
 
     # SLURM array (one monthly dump per task)
     python collect_instances.py \
-        --words drug_words.txt anchors_and_baselines.txt comparison_words.txt \
-        --reddit-monthly-dir ./reddit_dumps/ \
+        --words euphemisms.txt \
+        --reddit-monthly-dir ./monthly_dumps/ \
         --output ./matches/ \
         --slurm-task-id $SLURM_ARRAY_TASK_ID
 
@@ -523,35 +523,24 @@ def collect_instances(
             if not matches:
                 continue
 
-            # Split into sentences for context extraction
-            sentences = re.split(r"(?<=[.!?])\s+", text)
-
+            # Deduplicate matches — same word at same position
+            seen = set()
+            unique_matches = []
             for match in matches:
+                key = (match["word"], match["start"])
+                if key not in seen:
+                    seen.add(key)
+                    unique_matches.append(match)
+
+            for match in unique_matches:
                 total_matches += 1
                 word = match["word"]
                 match_counts[word] = match_counts.get(word, 0) + 1
 
-                # Find which sentence contains the match
-                char_pos = match["start"]
-                current_pos = 0
-                match_sent_idx = 0
-                for i, sent in enumerate(sentences):
-                    if current_pos + len(sent) >= char_pos:
-                        match_sent_idx = i
-                        break
-                    current_pos += len(sent) + 1  # +1 for the space
-
-                # Extract context window
-                ctx_start = max(0, match_sent_idx - context_sentences)
-                ctx_end = min(len(sentences), match_sent_idx + context_sentences + 1)
-                context = " ".join(sentences[ctx_start:ctx_end])
-
                 output_record = {
                     "word": word,
                     "category": match["category"],
-                    "sentence": sentences[match_sent_idx] if match_sent_idx < len(sentences) else text,
-                    "context": context,
-                    "full_text": text if len(sentences) <= 5 else "",  # save full text only if short
+                    "sentence": text,  # Full comment as the sentence
                     "timestamp": record["timestamp"],
                     "subreddit": record.get("subreddit", ""),
                     "permalink": record.get("permalink", ""),
@@ -710,42 +699,65 @@ def main():
         ))
         logger.info(f"Found {len(dump_files)} monthly dumps")
 
-        # SLURM array mode: process one file
+        # Group parts that belong to the same month
+        # RC_2018-07.zst, RC_2018-07_part000.zst, RC_2018-07_part001.zst
+        # all belong to "RC_2018-07"
+        from collections import defaultdict
+        month_groups = defaultdict(list)
+        for f in dump_files:
+            stem = Path(f).stem  # e.g. "RC_2018-07_part000"
+            # Extract base month: take first 10 chars "RC_YYYY-MM"
+            base = stem[:10] if len(stem) >= 10 else stem
+            month_groups[base].append(f)
+
+        logger.info(f"Grouped into {len(month_groups)} months")
+
+        # SLURM array mode: process one month (all its parts)
         if args.slurm_task_id is not None:
-            if args.slurm_task_id >= len(dump_files):
-                logger.info(f"Task {args.slurm_task_id} >= {len(dump_files)} files, nothing to do")
+            month_keys = sorted(month_groups.keys())
+            if args.slurm_task_id >= len(month_keys):
+                logger.info(f"Task {args.slurm_task_id} >= {len(month_keys)} months, nothing to do")
                 return
 
-            dump_file = dump_files[args.slurm_task_id]
-            month = Path(dump_file).stem  # RC_2020-01
-            out_path = os.path.join(args.output, f"{month}_matches.jsonl")
-            logger.info(f"SLURM task {args.slurm_task_id}: {dump_file}")
+            month_key = month_keys[args.slurm_task_id]
+            parts = month_groups[month_key]
+            out_path = os.path.join(args.output, f"{month_key}_matches.jsonl")
+            logger.info(f"SLURM task {args.slurm_task_id}: {month_key} ({len(parts)} files)")
 
-            stream = stream_reddit_file(
-                dump_file,
-                start_year=args.start_year,
-                end_year=args.end_year,
-                subreddits=subreddits,
-            )
-            collect_instances(stream, matcher, out_path, args.context_sentences)
+            def stream_all_parts():
+                for part in sorted(parts):
+                    logger.info(f"  Streaming: {Path(part).name}")
+                    yield from stream_reddit_file(
+                        part,
+                        start_year=args.start_year,
+                        end_year=args.end_year,
+                        subreddits=subreddits,
+                    )
+
+            collect_instances(stream_all_parts(), matcher, out_path, args.context_sentences)
         else:
-            # Sequential mode: process all files
-            for dump_file in dump_files:
-                month = Path(dump_file).stem
-                out_path = os.path.join(args.output, f"{month}_matches.jsonl")
+            # Sequential mode: process all months
+            for month_key in sorted(month_groups.keys()):
+                parts = month_groups[month_key]
+                out_path = os.path.join(args.output, f"{month_key}_matches.jsonl")
 
                 if os.path.exists(out_path):
-                    logger.info(f"Skipping {month} — already exists")
+                    logger.info(f"Skipping {month_key} — already exists")
                     continue
 
-                logger.info(f"\nProcessing: {dump_file}")
-                stream = stream_reddit_file(
-                    dump_file,
-                    start_year=args.start_year,
-                    end_year=args.end_year,
-                    subreddits=subreddits,
-                )
-                collect_instances(stream, matcher, out_path, args.context_sentences)
+                logger.info(f"\nProcessing: {month_key} ({len(parts)} files)")
+
+                def stream_all_parts(parts=parts):
+                    for part in sorted(parts):
+                        logger.info(f"  Streaming: {Path(part).name}")
+                        yield from stream_reddit_file(
+                            part,
+                            start_year=args.start_year,
+                            end_year=args.end_year,
+                            subreddits=subreddits,
+                        )
+
+                collect_instances(stream_all_parts(), matcher, out_path, args.context_sentences)
 
     elif args.csv_file:
         stream = stream_csv_file(args.csv_file)
