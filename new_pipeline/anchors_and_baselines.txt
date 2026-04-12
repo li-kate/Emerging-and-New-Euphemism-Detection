@@ -1,5 +1,6 @@
 # anchors_and_baselines.txt
 # Direct drug names (taboo anchors for embedding similarity)
+cathinones
 cocaine
 heroin
 marijuana
@@ -16,12 +17,9 @@ lsd
 pcp
 codeine
 ketamine
+bath salts
 # Established euphemisms (sanity check — should be stable high)
-snow
-ice
-pot
-weed
 molly
 coke
-dope
 crystal
+ping
