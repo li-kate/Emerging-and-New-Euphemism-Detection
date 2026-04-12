@@ -22,7 +22,7 @@ Required: pip install ahocorasick-rs   (Rust-backed, fastest option)
      or:  pip install pyahocorasick    (C-backed, also fast)
 ============================================================================
 """
-
+import argparse
 import json
 import logging
 import re
@@ -131,6 +131,42 @@ class CandidatePhrase:
     first_seen_timestamp: str = ""     # Earliest timestamp from first pass
     first_seen_source: str = ""        # Source of earliest occurrence
 
+def load_candidates_from_txt(
+    path: str,
+    config: SecondPassConfig,
+) -> dict[str, CandidatePhrase]:
+    """
+    Load candidate phrases from a plain text file (one phrase per line).
+    No scores or anchors — defaults are used.
+    """
+    candidates: dict[str, CandidatePhrase] = {}
+    total_loaded = 0
+
+    with open(path, "r") as f:
+        for line in f:
+            phrase = line.strip()
+            if not phrase:
+                continue
+
+            total_loaded += 1
+
+            key = phrase.lower() if not config.case_sensitive else phrase
+
+            if key not in candidates:
+                candidates[key] = CandidatePhrase(
+                    phrase=phrase,
+                    anchors=[],  # no anchor info
+                    max_score=1.0,  # default
+                    max_drop=1.0,   # default
+                    first_seen_timestamp="",
+                    first_seen_source="txt_input",
+                )
+
+    logger.info(
+        f"Loaded {total_loaded} candidate phrases from TXT, "
+        f"{len(candidates)} unique after deduplication"
+    )
+    return candidates
 
 def load_first_pass_candidates(
     path: str,
@@ -472,18 +508,27 @@ class PatternMatcher:
 
     def _build_automaton(self):
         """Try Rust backend first, fall back to C backend."""
+
         # Try ahocorasick-rs (Rust)
-        try:
-            import ahocorasick_rs
-            self._automaton = ahocorasick_rs.AhoCorasick(
-                self.patterns,
-                match_kind=ahocorasick_rs.MatchKind.LeftmostLongest,
-            )
-            self._backend = "rust"
-            logger.info("Using ahocorasick-rs (Rust) backend")
-            return
-        except ImportError:
-            pass
+        # try:
+        #     import ahocorasick_rs
+
+        #     try:
+        #         # Newer versions support match_kind
+        #         self._automaton = ahocorasick_rs.AhoCorasick(
+        #             self.patterns,
+        #             match_kind=ahocorasick_rs.MatchKind.LeftmostLongest,
+        #         )
+        #     except TypeError:
+        #         # Older versions (like yours) do NOT support match_kind
+        #         self._automaton = ahocorasick_rs.AhoCorasick(self.patterns)
+
+        #     self._backend = "rust"
+        #     logger.info("Using ahocorasick-rs (Rust) backend")
+        #     return
+
+        # except ImportError:
+        #     pass
 
         # Try pyahocorasick (C)
         try:
@@ -496,13 +541,13 @@ class PatternMatcher:
             self._backend = "c"
             logger.info("Using pyahocorasick (C) backend")
             return
+
         except ImportError:
             pass
 
-        # Fallback: pure Python (slow but works)
+        # Fallback
         logger.warning(
-            "No Aho-Corasick library found. Using naive matching (SLOW). "
-            "Install: pip install ahocorasick-rs  OR  pip install pyahocorasick"
+            "No Aho-Corasick library found. Using naive matching (SLOW)."
         )
         self._backend = "naive"
 
@@ -521,23 +566,23 @@ class PatternMatcher:
         search_text = text if self.case_sensitive else text.lower()
         matches = []
 
-        if self._backend == "rust":
-            for match in self._automaton.find_overlapping(search_text):
-                pattern_idx = match.pattern()
-                start = match.start()
-                end = match.end()
-                pattern = self.patterns[pattern_idx]
-                key = self.pattern_to_key[pattern]
-                # Word boundary check: ensure we're not matching inside a word
-                if _is_word_boundary(search_text, start, end):
-                    matches.append({
-                        "phrase": text[start:end],  # Preserve original casing
-                        "candidate_key": key,
-                        "start": start,
-                        "end": end,
-                    })
+        # if self._backend == "rust":
+        #     for match in self._automaton.find_overlapping(search_text):
+        #         pattern_idx = match.pattern()
+        #         start = match.start()
+        #         end = match.end()
+        #         pattern = self.patterns[pattern_idx]
+        #         key = self.pattern_to_key[pattern]
+        #         # Word boundary check: ensure we're not matching inside a word
+        #         if _is_word_boundary(search_text, start, end):
+        #             matches.append({
+        #                 "phrase": text[start:end],  # Preserve original casing
+        #                 "candidate_key": key,
+        #                 "start": start,
+        #                 "end": end,
+        #             })
 
-        elif self._backend == "c":
+        if self._backend == "c":
             for end_idx, (pattern_idx, pattern) in self._automaton.iter(search_text):
                 start = end_idx - len(pattern) + 1
                 end = end_idx + 1
@@ -965,7 +1010,10 @@ def run_second_pass(
 
     # 1. Load first-pass candidates
     logger.info(f"Loading candidates from {config.first_pass_results_path}...")
-    candidates = load_first_pass_candidates(config.first_pass_results_path, config)
+    if config.first_pass_results_path.endswith(".txt"):
+        candidates = load_candidates_from_txt(config.first_pass_results_path, config)
+    else:
+        candidates = load_first_pass_candidates(config.first_pass_results_path, config)
 
     if not candidates:
         logger.error("No candidates loaded. Check first pass output path and filters.")
@@ -1055,21 +1103,46 @@ def run_second_pass_experiments(
 # ============================================================================
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--input", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--mode", default="exact")  # exact | lemma | stem
+    parser.add_argument("--context", type=int, default=1)
+    parser.add_argument("--reddit_dir", default=None)
+    parser.add_argument("--text_file", default=None)
+
+    args = parser.parse_args()
+
     from data_sources import (
         SourceConfig,
         stream_text_file,
         stream_reddit_directory,
-        # stream_common_crawl_wet,
-        # stream_wikipedia_dump,
     )
 
-    # Use the SAME source config as the first pass for consistency
     source_config = SourceConfig(
         target_languages={"en"},
         lang_confidence_threshold=0.7,
         start_year=2015,
         end_year=2026,
     )
+
+    sources = []
+
+    if args.reddit_dir:
+        sources.append(stream_reddit_directory(args.reddit_dir, config=source_config))
+
+    if args.text_file:
+        sources.append(stream_text_file(args.text_file, config=source_config))
+
+    config = SecondPassConfig(
+        first_pass_results_path=args.input,
+        match_mode=args.mode,
+        context_sentences=args.context,
+        output_path=args.output,
+    )
+
+    run_second_pass(sources, config)
 
     # ------------------------------------------------------------------
     # SINGLE RUN

@@ -1,0 +1,27 @@
+# anchors_and_baselines.txt
+# Direct drug names (taboo anchors for embedding similarity)
+cocaine
+heroin
+marijuana
+fentanyl
+methamphetamine
+meth
+amphetamine
+oxycodone
+xanax
+adderall
+mdma
+ecstasy
+lsd
+pcp
+codeine
+ketamine
+# Established euphemisms (sanity check — should be stable high)
+snow
+ice
+pot
+weed
+molly
+coke
+dope
+crystal

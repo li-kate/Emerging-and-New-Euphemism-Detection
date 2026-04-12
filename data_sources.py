@@ -386,14 +386,14 @@ def stream_common_crawl_wet(
             if not content:
                 continue
 
-            for line in content.split("\n"):
-                line = clean_text(line)
-                if not line:
+            for sentence in re.split(r"(?<=[.!?])\s+", content):
+                sentence = clean_text(sentence)
+                if not sentence:
                     continue
 
-                if filter_record(line, timestamp, config):
+                if filter_record(sentence, timestamp, config):
                     yield TextRecord(
-                        text=line,
+                        text=sentence,
                         timestamp=timestamp,
                         source_url=uri,
                         source="Common Crawl",
@@ -1170,3 +1170,28 @@ def stream_common_crawl(
     yield from stream_common_crawl_wet_list(
         paths_file, config=config, max_files=max_files,
     )
+
+def write_sentences_to_txt(
+    stream: Iterator[TextRecord],
+    output_path: str,
+    include_metadata: bool = False,
+):
+    import os
+
+    dirpath = os.path.dirname(output_path)
+    if dirpath:  # <-- FIX: only create if non-empty
+        os.makedirs(dirpath, exist_ok=True)
+
+    count = 0
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        for record in stream:
+            if include_metadata:
+                line = f"[{record.source} | {record.timestamp}] {record.text}\n"
+            else:
+                line = record.text + "\n"
+
+            f.write(line)
+            count += 1
+
+    logger.info(f"Wrote {count} sentences to {output_path}")
