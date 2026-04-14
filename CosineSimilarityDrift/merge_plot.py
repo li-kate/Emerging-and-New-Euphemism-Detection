@@ -25,8 +25,12 @@ for f_path in partial_files:
             
             # Merge embeddings
             for cand, slices in content["data"].items():
-                for t_slice, entries in slices.items():
-                    all_data[cand][t_slice].extend(entries)
+                for t_slice, stats in slices.items():
+                    if t_slice not in all_data[cand]:
+                        all_data[cand][t_slice] = {"total_sum": np.zeros(768), "total_count": 0, "category": stats["category"]}
+                    
+                    all_data[cand][t_slice]["total_sum"] += np.array(stats["sum_embedding"])
+                    all_data[cand][t_slice]["total_count"] += stats["count"]
             
             # Merge taboo reference embeddings
             for cat, emb in content["taboos"].items():
@@ -52,16 +56,15 @@ for candidate, slices in all_data.items():
     valid_times = []
     
     for t_slice in time_keys:
-        entries = slices[t_slice]
+        data = slices[t_slice]
         # Calculate mean of all embeddings for this word in this month
         try:
-            embs = np.array([e["embedding"] for e in entries])
-            mean_emb = np.mean(embs, axis=0).reshape(1, -1)
+            true_mean = (data["total_sum"] / data["total_count"]).reshape(1, -1)
             
-            category = entries[0]["category"]
+            category = data["category"]
             taboo_emb = all_taboos[category].reshape(1, -1)
             
-            sim = cosine_similarity(mean_emb, taboo_emb)[0][0]
+            sim = cosine_similarity(true_mean, taboo_emb)[0][0]
             similarities.append(sim)
             valid_times.append(t_slice)
         except Exception as e:

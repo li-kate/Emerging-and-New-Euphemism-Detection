@@ -14,9 +14,9 @@ task_id = int(os.environ.get("SLURM_ARRAY_TASK_ID", 0))
 
 # SETTINGS
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-DATA_DIR = "../SecondPass/matches/2018"
+DATA_DIR = "../SecondPass/matches"
 MODEL_NAME = "bert-base-uncased"
-BATCH_SIZE = 64 # Increased for H100 efficiency
+BATCH_SIZE = 256 # Increased for H100 efficiency
 
 # 1. Identify the specific file for this task
 jsonl_files = sorted(glob.glob(os.path.join(DATA_DIR, "*.jsonl")))
@@ -109,8 +109,18 @@ with open(target_file, "r") as f:
 
 # Finalize and Save
 # We save raw embeddings to be averaged in the merge script
+summarized_data = defaultdict(dict)
+for cand, slices in candidate_slices.items():
+    for t_slice, entries in slices.items():
+        # Stack all embeddings for this month in this file
+        embs = np.array([e["embedding"] for e in entries])
+        
+        summarized_data[cand][t_slice] = {
+            "sum_embedding": np.sum(embs, axis=0).tolist(), # Sum of all vectors
+            "count": int(len(entries)),                    # Number of vectors
+            "category": entries[0]["category"]
+        }
+
 output_file = f"partial_results_{task_id}.json"
 with open(output_file, "w") as f:
-    json.dump({"data": candidate_slices, "taboos": {k: v.tolist() for k, v in taboo_embeddings.items()}}, f)
-
-print(f"Task {task_id} complete. Saved to {output_file}")
+    json.dump({"data": summarized_data, "taboos": {k: v.tolist() for k, v in taboo_embeddings.items()}}, f)
