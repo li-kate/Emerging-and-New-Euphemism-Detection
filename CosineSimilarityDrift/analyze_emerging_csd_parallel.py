@@ -75,10 +75,14 @@ def embed_text(text):
 candidate_slices = defaultdict(lambda: defaultdict(list))
 taboo_embeddings = {}
 batch_queue = []
+skipped = 0
+total_processed_rows = 0
+matches_found = 0
 
 with open(target_file, "r") as f:
     for line in f:
         if not line.strip(): continue
+        total_processed_rows += 1
         row = json.loads(line)
         sentence, candidate = row.get("sentence", ""), row.get("word", "")
         category = row.get("primary_category", row.get("category"))
@@ -86,6 +90,8 @@ with open(target_file, "r") as f:
         if not sentence or not candidate: continue
         start, end = find_span(sentence, candidate)
         if start is None: continue
+
+        matches_found += 1
         
         if category not in taboo_embeddings:
             taboo_embeddings[category] = embed_text(category)
@@ -105,7 +111,19 @@ with open(target_file, "r") as f:
                         "embedding": emb.tolist(), # Convert to list for JSON
                         "category": item["category"]
                     })
+                else:
+                    skipped += 1
             batch_queue = []
+
+            # Periodic progress update every 10,000 lines
+            if total_processed_rows % 10000 == 0:
+                print(f"Rows read: {total_processed_rows} | Matches found: {matches_found} | Skipped: {skipped}")
+                
+print(f"Streaming complete. Total rows read: {total_processed_rows}")
+print(f"Total valid candidate matches found: {matches_found}")
+print(f"Skipped rows (BERT tokenization issues): {skipped}")
+
+print("Saving raw embeddings...")
 
 # Finalize and Save
 # We save raw embeddings to be averaged in the merge script
@@ -120,6 +138,8 @@ for cand, slices in candidate_slices.items():
             "count": int(len(entries)),                    # Number of vectors
             "category": entries[0]["category"]
         }
+
+print("Outputting partial results...")
 
 output_file = f"partial_results_{task_id}.json"
 with open(output_file, "w") as f:
