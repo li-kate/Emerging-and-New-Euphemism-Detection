@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=drift_array
+#SBATCH --job-name=drift_parallel
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=4
@@ -7,7 +7,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --time=12:00:00
 #SBATCH --array=0-10
-#SBATCH --output=logs2/array_%A_%a.out
+#SBATCH --output=logs2/array_%A_%a.ou
 
 # ============================================================================
 # SETUP

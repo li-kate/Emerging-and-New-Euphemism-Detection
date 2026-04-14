@@ -1,3 +1,5 @@
+# DON'T USE THIS - NOT PARALLELIZED
+
 # this code is for analyzing emerging euphemisms
 # uses the cosine similarity drift method
 # Pipeline:
@@ -23,6 +25,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import os
+import glob
 
 os.makedirs("plots", exist_ok=True)
 
@@ -31,19 +34,26 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 # CHANGE PATH BEFORE RUNNING
-DATA_NAME = "second_pass_test.jsonl"
+DATA_DIR = "../SecondPass/matches/"
+jsonl_files = glob.glob(os.path.join(DATA_DIR, "*.jsonl"))
 
 # Load Data
 data = []
-with open(DATA_NAME, "r") as f:
-    for line in f:
-        if line.strip():
-            data.append(json.loads(line))
+for file_path in jsonl_files:
+    print(f"Loading {file_path}...")
+    with open(file_path, "r") as f:
+        for line in f:
+            if line.strip():
+                data.append(json.loads(line))
+
+if not data:
+    print("No data found! Check your DATA_DIR path.")
+    exit()
 
 # Sort by candidate then timestamp
 data = sorted(
     data,
-    key=lambda x: (x["canonical_phrase"], x["timestamp"])
+    key=lambda x: (x["word"], x["timestamp"])
 )
 
 # Create Half-Year Time Slices
@@ -117,18 +127,18 @@ candidate_slices = defaultdict(lambda: defaultdict(list))
 for row in tqdm(data):
     embedding = get_phrase_embedding(
         row["sentence"],
-        row["char_offset_start"],
-        row["char_offset_end"]
+        row["start"],
+        row["end"]
     )
     if embedding is None:
         continue
 
-    candidate = row["canonical_phrase"]
+    candidate = row["word"]
     slice_key = get_month_slice(row["timestamp"])
 
     candidate_slices[candidate][slice_key].append({
         "embedding": embedding,
-        "category": row["primary_category"]
+        "category": row["category"]
     })
 
 # Compute Mean Embeddings + Similarity
