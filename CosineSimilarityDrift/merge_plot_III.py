@@ -28,6 +28,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from collections import defaultdict
 from sklearn.metrics.pairwise import cosine_similarity
+from scipy import stats as scipy_stats
 import os
 import re
 
@@ -197,6 +198,17 @@ def run_analysis(anchor_embeddings, label):
         centroid_mean = float(np.mean(centroid_sims))
         centroid_std = float(np.std(centroid_sims))
 
+        # Statistical significance: is the trend real or noise?
+        # Pearson r: correlation between time index and similarity
+        # p-value: probability of observing this correlation by chance
+        if len(x) > 2:
+            r_val, p_val = scipy_stats.pearsonr(x, centroid_sims)
+            centroid_r = float(r_val)
+            centroid_p = float(p_val)
+        else:
+            centroid_r = 0.0
+            centroid_p = 1.0
+
         # ── Secondary stats: per-anchor ──
         mean_sims_per_anchor = sim_matrix.mean(axis=0)
         best_anchor_idx = np.argmax(mean_sims_per_anchor)
@@ -227,6 +239,9 @@ def run_analysis(anchor_embeddings, label):
             "centroid_drift": round(centroid_drift, 4),
             "centroid_mean_sim": round(centroid_mean, 4),
             "centroid_std_sim": round(centroid_std, 4),
+            "centroid_r": round(centroid_r, 4),       # Pearson correlation
+            "centroid_p": round(centroid_p, 4),       # p-value (< 0.05 = significant)
+            "centroid_significant": centroid_p < 0.05, # Quick flag
             # SECONDARY: per-anchor
             "best_anchor": best_anchor,
             "best_anchor_mean_sim": round(float(mean_sims_per_anchor[best_anchor_idx]), 4),
@@ -248,7 +263,7 @@ def run_analysis(anchor_embeddings, label):
         ax1.set_xlabel("Month")
         ax1.set_title(
             f"\"{word}\" [{group}] — Drug Centroid Drift [{label}]  "
-            f"(slope={centroid_slope:.4f}, n={sum(counts)})"
+            f"(slope={centroid_slope:.4f}, r={centroid_r:.3f}, p={centroid_p:.3f}, n={sum(counts)})"
         )
 
         ax2 = ax1.twinx()
@@ -405,6 +420,9 @@ def save_summary(results, label):
             "centroid_mean_sim": r["centroid_mean_sim"],
             "centroid_slope": r["centroid_slope"],
             "centroid_drift": r["centroid_drift"],
+            "centroid_r": r["centroid_r"],
+            "centroid_p": r["centroid_p"],
+            "centroid_significant": r["centroid_significant"],
             # SECONDARY: per-anchor
             "best_anchor": r["best_anchor"],
             "best_anchor_mean_sim": r["best_anchor_mean_sim"],
@@ -419,23 +437,50 @@ def save_summary(results, label):
         json.dump(summary, f, indent=2)
     print(f"\nSaved: {out_path} ({len(summary)} words)")
 
-    # Print grouped results
+    # Print grouped results with significance
     for group_name in ["euphemism_candidate", "established_euphemism", "comparison"]:
         group_rows = [r for r in results_sorted if r["group"] == group_name]
         if not group_rows:
             continue
-        print(f"\n── {group_name.upper()} [{label}] ──")
-        print(f"{'Word':<18} {'Centroid':>9} {'Slope':>9} {'Drift':>8} │ "
-              f"{'Best Anchor':<18} {'Anchor Sim':>10} {'Steepest→':<15} {'Instances':>10}")
-        print("─" * 120)
+        sig_count = sum(1 for r in group_rows if r["centroid_significant"])
+        print(f"\n── {group_name.upper()} [{label}] ({sig_count}/{len(group_rows)} significant) ──")
+        print(f"{'Word':<18} {'Mean Sim':>9} {'Slope':>9} {'r':>7} {'p':>7} {'Sig':>4} │ "
+              f"{'Best Anchor':<15} {'Instances':>10}")
+        print("─" * 100)
         for r in group_rows:
+            sig_marker = " *" if r["centroid_significant"] else "  "
             print(
                 f"{r['word']:<18} "
                 f"{r['centroid_mean_sim']:>9.4f} {r['centroid_slope']:>9.4f} "
-                f"{r['centroid_drift']:>8.4f} │ "
-                f"{r['best_anchor']:<18} {r['best_anchor_mean_sim']:>10.4f} "
-                f"{r['steepest_anchor']:<15} {r['total_instances']:>10}"
+                f"{r['centroid_r']:>7.3f} {r['centroid_p']:>7.3f} {sig_marker:>4} │ "
+                f"{r['best_anchor']:<15} {r['total_instances']:>10}"
             )
+
+    # ── GROUP-LEVEL STATISTICAL TEST ──
+    # Are euphemism candidate slopes significantly different from comparison word slopes?
+    candidate_slopes = [r["centroid_slope"] for r in results_sorted if r["group"] == "euphemism_candidate"]
+    comparison_slopes = [r["centroid_slope"] for r in results_sorted if r["group"] == "comparison"]
+
+    if len(candidate_slopes) >= 2 and len(comparison_slopes) >= 2:
+        print(f"\n── GROUP-LEVEL TEST [{label}] ──")
+        print(f"  Candidate slopes:   mean={np.mean(candidate_slopes):.6f}, n={len(candidate_slopes)}")
+        print(f"  Comparison slopes:  mean={np.mean(comparison_slopes):.6f}, n={len(comparison_slopes)}")
+
+        # Mann-Whitney U: non-parametric, doesn't assume normality
+        # Tests whether candidate slopes tend to be larger than comparison slopes
+        u_stat, u_p = scipy_stats.mannwhitneyu(
+            candidate_slopes, comparison_slopes, alternative="greater"
+        )
+        print(f"  Mann-Whitney U (candidates > comparisons): U={u_stat:.1f}, p={u_p:.4f}")
+        if u_p < 0.05:
+            print(f"  → SIGNIFICANT: euphemism candidates drift more than comparison words (p={u_p:.4f})")
+        else:
+            print(f"  → Not significant at α=0.05 (p={u_p:.4f})")
+
+        # Also report established euphemisms vs comparison
+        established_slopes = [r["centroid_slope"] for r in results_sorted if r["group"] == "established_euphemism"]
+        if len(established_slopes) >= 2:
+            print(f"  Established slopes: mean={np.mean(established_slopes):.6f}, n={len(established_slopes)}")
 
 
 save_summary(results_a, "template")
