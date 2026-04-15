@@ -3,6 +3,10 @@ Per-file BERT embedding script for SLURM array jobs.
 Extracts contextual span embeddings for all words (anchors, euphemism
 candidates, established euphemisms, and comparison words).
 
+INCREMENTAL SAVING: Checkpoints to disk every SAVE_EVERY batches.
+If the job crashes or times out, restarting picks up from the last
+checkpoint — no work is lost.
+
 Saves:
   - Per-word, per-month sum embeddings + counts (for averaging in merge)
   - Per-anchor template span embeddings (for per-anchor similarity in merge)
@@ -33,14 +37,15 @@ DATA_DIR = "../matches"
 MODEL_NAME = "bert-base-uncased"
 BATCH_SIZE = 256
 HIDDEN_DIM = 768
+SAVE_EVERY = 20  # Save checkpoint every N batches (~5120 rows)
+
+# Output paths
+OUTPUT_FILE = f"partial_results_{task_id}.json"
+CHECKPOINT_FILE = f"checkpoint_{task_id}.json"
 
 # ──────────────────────────────────────────────────────────────
 # WORD GROUPS
-# These define the three-way comparison at the heart of the analysis.
 # ──────────────────────────────────────────────────────────────
-
-# Direct drug names — these are the taboo anchors.
-# Each candidate will be compared against EACH of these individually.
 ANCHORS = [
     "cathinones", "cocaine", "heroin", "marijuana", "fentanyl",
     "methamphetamine", "meth", "amphetamine", "oxycodone", "xanax",
@@ -48,22 +53,15 @@ ANCHORS = [
     "bath salts",
 ]
 
-# Established euphemisms — should show STABLE HIGH similarity to their anchor.
-# These are your positive controls / sanity checks.
 ESTABLISHED_EUPHEMISMS = ["molly", "coke", "crystal", "ping"]
 
-# Euphemism candidates — the words you're actually studying.
-# These are what you expect to show INCREASING similarity over time.
 EUPHEMISM_CANDIDATES = [
     "study", "skittles", "zing", "zaza", "christina", "flakka",
     "yart", "zoom", "fein", "flower", "yimyom", "fenty", "pressed",
 ]
 
-# Comparison words — drug-adjacent but NOT euphemistic.
-# Should show FLAT, LOW similarity. Negative controls.
 COMPARISON_WORDS = ["needle", "pharmacy", "prescription", "overdose"]
 
-# Build a lookup: word -> group label
 WORD_GROUPS = {}
 for w in ANCHORS:
     WORD_GROUPS[w.lower()] = "anchor"
@@ -74,7 +72,6 @@ for w in EUPHEMISM_CANDIDATES:
 for w in COMPARISON_WORDS:
     WORD_GROUPS[w.lower()] = "comparison"
 
-# Templates for building per-anchor reference embeddings (Option A).
 ANCHOR_TEMPLATES = [
     "They were caught with {}.",
     "The effects of {} can be dangerous.",
@@ -87,7 +84,6 @@ ANCHOR_TEMPLATES = [
 # HELPERS
 # ──────────────────────────────────────────────────────────────
 def get_month_slice(timestamp):
-    """Extract YYYY-MM from ISO timestamp."""
     try:
         dt = datetime.fromisoformat(timestamp.replace("Z", ""))
         return dt.strftime("%Y-%m")
@@ -96,10 +92,76 @@ def get_month_slice(timestamp):
 
 
 def find_span(sentence, word):
-    """Find character-level (start, end) of `word` in `sentence`."""
     pattern = r"\b" + re.escape(word) + r"\b"
     match = re.search(pattern, sentence, re.IGNORECASE)
     return (match.start(), match.end()) if match else (None, None)
+
+
+# ──────────────────────────────────────────────────────────────
+# CHECKPOINT SAVE / LOAD
+# ──────────────────────────────────────────────────────────────
+def save_checkpoint(candidate_slices, corpus_anchor_sums, stats, rows_processed):
+    """Save current state to disk. Atomic write via rename."""
+    data = {
+        "rows_processed": rows_processed,
+        "stats": stats,
+        "corpus_anchor_sums": {
+            anchor: {"sum": d["sum"].tolist(), "count": d["count"]}
+            for anchor, d in corpus_anchor_sums.items()
+        },
+        "candidate_slices": {},
+    }
+    for cand, slices in candidate_slices.items():
+        data["candidate_slices"][cand] = {}
+        for month, entry in slices.items():
+            data["candidate_slices"][cand][month] = {
+                "sum_embedding": entry["sum_embedding"].tolist(),
+                "count": entry["count"],
+            }
+
+    # Write to temp file then rename — prevents corruption if killed mid-write
+    tmp_file = CHECKPOINT_FILE + ".tmp"
+    with open(tmp_file, "w") as f:
+        json.dump(data, f)
+    os.replace(tmp_file, CHECKPOINT_FILE)
+
+
+def load_checkpoint():
+    """Load checkpoint if it exists. Returns (candidate_slices, corpus_anchor_sums, stats, rows_to_skip) or None."""
+    if not os.path.exists(CHECKPOINT_FILE):
+        return None
+
+    print(f"Found checkpoint: {CHECKPOINT_FILE}")
+    try:
+        with open(CHECKPOINT_FILE, "r") as f:
+            data = json.load(f)
+
+        # Rebuild candidate_slices
+        candidate_slices = defaultdict(lambda: defaultdict(lambda: {
+            "sum_embedding": np.zeros(HIDDEN_DIM), "count": 0,
+        }))
+        for cand, slices in data["candidate_slices"].items():
+            for month, entry in slices.items():
+                candidate_slices[cand][month]["sum_embedding"] = np.array(entry["sum_embedding"])
+                candidate_slices[cand][month]["count"] = entry["count"]
+
+        # Rebuild corpus_anchor_sums
+        corpus_anchor_sums = {}
+        for anchor, d in data["corpus_anchor_sums"].items():
+            corpus_anchor_sums[anchor] = {
+                "sum": np.array(d["sum"]),
+                "count": d["count"],
+            }
+
+        rows_processed = data["rows_processed"]
+        stats = data["stats"]
+        print(f"  Resuming from row {rows_processed}")
+        print(f"  Stats so far: embedded={stats['embedded']}, skipped={stats['skipped_no_tokens']}")
+        return candidate_slices, corpus_anchor_sums, stats, rows_processed
+
+    except Exception as e:
+        print(f"  [WARN] Checkpoint corrupted ({e}), starting fresh.")
+        return None
 
 
 # ──────────────────────────────────────────────────────────────
@@ -112,13 +174,6 @@ model.eval()
 
 
 def extract_span_embedding(sentence, char_start, char_end):
-    """
-    Get the contextual embedding of a character span within a sentence.
-    Returns numpy vector of shape (HIDDEN_DIM,), or None on failure.
-
-    This is the SINGLE source of truth for turning a word-in-context
-    into a vector. Candidates, anchors, and controls all use this.
-    """
     inputs = tokenizer(
         sentence,
         return_offsets_mapping=True,
@@ -147,7 +202,6 @@ def extract_span_embedding(sentence, char_start, char_end):
 
 
 def get_batch_span_embeddings(batch_data):
-    """Batch version of span extraction for GPU efficiency."""
     sentences = [d["sentence"] for d in batch_data]
 
     inputs = tokenizer(
@@ -189,11 +243,10 @@ def get_batch_span_embeddings(batch_data):
 
 # ──────────────────────────────────────────────────────────────
 # BUILD PER-ANCHOR TEMPLATE EMBEDDINGS (Option A)
-# For each anchor word, we get a span embedding averaged across
-# multiple template sentences. These are FIXED reference vectors.
+# Always recomputed (fast, deterministic, no checkpoint needed)
 # ──────────────────────────────────────────────────────────────
 print("Building per-anchor template embeddings (Option A)...")
-anchor_template_embeddings = {}  # anchor_word -> numpy vector
+anchor_template_embeddings = {}
 
 for anchor in ANCHORS:
     word_vectors = []
@@ -227,28 +280,35 @@ print(f"Task {task_id}: processing {os.path.basename(target_file)}")
 
 
 # ──────────────────────────────────────────────────────────────
-# PROCESS FILE
+# LOAD CHECKPOINT OR INITIALIZE FRESH
 # ──────────────────────────────────────────────────────────────
-# Accumulator: word -> month -> {sum_embedding, count}
-candidate_slices = defaultdict(lambda: defaultdict(lambda: {
-    "sum_embedding": np.zeros(HIDDEN_DIM),
-    "count": 0,
-}))
+checkpoint = load_checkpoint()
 
-# Option B: per-anchor corpus embedding accumulators
-# anchor_word -> {sum, count}
-corpus_anchor_sums = {
-    anchor: {"sum": np.zeros(HIDDEN_DIM), "count": 0}
-    for anchor in ANCHORS
-}
-# Build a fast lowercase lookup for anchor matching
+if checkpoint:
+    candidate_slices, corpus_anchor_sums, stats, rows_to_skip = checkpoint
+else:
+    candidate_slices = defaultdict(lambda: defaultdict(lambda: {
+        "sum_embedding": np.zeros(HIDDEN_DIM), "count": 0,
+    }))
+    corpus_anchor_sums = {
+        anchor: {"sum": np.zeros(HIDDEN_DIM), "count": 0}
+        for anchor in ANCHORS
+    }
+    stats = {
+        "rows_read": 0, "span_found": 0, "embedded": 0,
+        "skipped_no_span": 0, "skipped_no_tokens": 0,
+    }
+    rows_to_skip = 0
+
 anchor_lower_map = {a.lower(): a for a in ANCHORS}
 
+
+# ──────────────────────────────────────────────────────────────
+# PROCESS FILE
+# ──────────────────────────────────────────────────────────────
 batch_queue = []
-stats = {
-    "rows_read": 0, "span_found": 0, "embedded": 0,
-    "skipped_no_span": 0, "skipped_no_tokens": 0,
-}
+batches_since_save = 0
+current_row = 0
 
 
 def flush_batch(queue):
@@ -262,13 +322,11 @@ def flush_batch(queue):
             month = get_month_slice(item["timestamp"])
             word_lower = item["candidate"].lower()
 
-            # Track monthly embeddings for ALL words
             entry = candidate_slices[item["candidate"]][month]
             entry["sum_embedding"] += emb
             entry["count"] += 1
             stats["embedded"] += 1
 
-            # If this word is an anchor, also accumulate for corpus centroid
             if word_lower in anchor_lower_map:
                 anchor_key = anchor_lower_map[word_lower]
                 corpus_anchor_sums[anchor_key]["sum"] += emb
@@ -281,6 +339,13 @@ with open(target_file, "r") as f:
     for line in f:
         if not line.strip():
             continue
+
+        current_row += 1
+
+        # Skip rows already processed (from checkpoint)
+        if current_row <= rows_to_skip:
+            continue
+
         stats["rows_read"] += 1
 
         row = json.loads(line)
@@ -308,10 +373,14 @@ with open(target_file, "r") as f:
         if len(batch_queue) >= BATCH_SIZE:
             flush_batch(batch_queue)
             batch_queue = []
+            batches_since_save += 1
 
-            if stats["rows_read"] % 10000 == 0:
+            # Incremental save
+            if batches_since_save >= SAVE_EVERY:
+                save_checkpoint(candidate_slices, corpus_anchor_sums, stats, current_row)
+                batches_since_save = 0
                 print(
-                    f"  Rows: {stats['rows_read']} | "
+                    f"  [CHECKPOINT] Row {current_row} | "
                     f"Embedded: {stats['embedded']} | "
                     f"Skipped: {stats['skipped_no_tokens']}"
                 )
@@ -329,26 +398,18 @@ print(f"  Skipped (no tokens):   {stats['skipped_no_tokens']}")
 
 
 # ──────────────────────────────────────────────────────────────
-# SAVE PARTIAL RESULTS
+# SAVE FINAL RESULTS
 # ──────────────────────────────────────────────────────────────
 output = {
-    # Per-word, per-month sum embeddings
     "data": {},
-    # Option A: per-anchor template embeddings (fixed, same across files)
     "anchor_template_embeddings": {
         k: v.tolist() for k, v in anchor_template_embeddings.items()
     },
-    # Option B: per-anchor corpus sums (to be averaged in merge)
     "corpus_anchor_sums": {
-        anchor: {
-            "sum": data["sum"].tolist(),
-            "count": data["count"],
-        }
+        anchor: {"sum": data["sum"].tolist(), "count": data["count"]}
         for anchor, data in corpus_anchor_sums.items()
     },
-    # Word group labels
     "word_groups": WORD_GROUPS,
-    # Processing stats
     "stats": stats,
 }
 
@@ -360,11 +421,15 @@ for cand, slices in candidate_slices.items():
             "count": entry["count"],
         }
 
-output_file = f"partial_results_{task_id}.json"
-with open(output_file, "w") as f:
+with open(OUTPUT_FILE, "w") as f:
     json.dump(output, f)
 
-print(f"\nSaved: {output_file}")
+# Clean up checkpoint now that final output is saved
+if os.path.exists(CHECKPOINT_FILE):
+    os.remove(CHECKPOINT_FILE)
+    print("Checkpoint cleaned up.")
+
+print(f"\nSaved: {OUTPUT_FILE}")
 print(f"Unique words in this file: {len(candidate_slices)}")
 corpus_with_data = sum(1 for v in corpus_anchor_sums.values() if v["count"] > 0)
 print(f"Anchors with corpus data: {corpus_with_data}/{len(ANCHORS)}")
