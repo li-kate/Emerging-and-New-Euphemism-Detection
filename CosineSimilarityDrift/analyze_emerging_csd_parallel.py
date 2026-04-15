@@ -32,6 +32,16 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 model = AutoModel.from_pretrained(MODEL_NAME).to(device)
 model.eval()
 
+# Create Half-Year Time Slices
+def get_half_year(timestamp):
+    try:
+        dt = datetime.fromisoformat(timestamp.replace("Z", ""))
+        year = dt.year
+        half = 1 if dt.month <= 6 else 2
+        return f"{year}_H{half}"
+    except: return "unknown"
+
+# Create Monthly Time Slices
 def get_month_slice(timestamp):
     try:
         dt = datetime.fromisoformat(timestamp.replace("Z", ""))
@@ -106,7 +116,7 @@ with open(target_file, "r") as f:
             for i, emb in enumerate(embs):
                 if emb is not None:
                     item = batch_queue[i]
-                    slice_key = get_month_slice(item["timestamp"])
+                    slice_key = get_half_year(item["timestamp"])
                     candidate_slices[item["candidate"]][slice_key].append({
                         "embedding": emb.tolist(), # Convert to list for JSON
                         "category": item["category"]
