@@ -109,7 +109,13 @@ EXTRA_TABOO = [
     "crack", "crystal", "ice", "speed",
     "pill", "pills", "tablet", "capsule",
     "powder", "rock", "rocks",
-    "syringe", "needle",
+    "syringe", "needle","percocet", "suboxone", "klonopin", "ritalin", "concerta",
+    "vicodin", "norco", "dilaudid", "rohypnol", "oxycontin",
+    "roxicodone", "ketalar", "daytrana", "morphine", "opium",
+    "ghb", "peyote", "mescaline", "psilocybin", "mushrooms",
+    "steroids", "khat", "hash", "hydrocodone", "hydromorphone",
+    "promethazine", "buprenorphine", "naloxone", "clonazepam",
+    "alprazolam", "flunitrazepam", "methylphenidate",
 ]
 for w in EXTRA_TABOO:
     TABOO_VOCAB.add(w.lower())
