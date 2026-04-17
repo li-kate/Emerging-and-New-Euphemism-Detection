@@ -200,6 +200,65 @@ print(f"Per-word plots saved to {plot_dir}/")
 
 
 # ──────────────────────────────────────────────────────────────
+# 2b. PRINT AND SAVE PER-WORD BIN DATA
+# ──────────────────────────────────────────────────────────────
+data_dir = os.path.join(OUTPUT_DIR, "data_per_word")
+os.makedirs(data_dir, exist_ok=True)
+
+# Also build one big CSV with all words
+all_rows_csv = []
+
+for r in results:
+    word = r["word"]
+    group = r["group"]
+    months = r["months"]
+    rates = r["rates"]
+    counts = r["counts"]
+
+    # Print table
+    print(f"\n── {word} [{group}] (slope={r['slope']:.4f}, mean={r['mean_rate']:.4f}) ──")
+    print(f"  {'Period':<12} {'Hits':>8} {'Total':>8} {'Rate':>8}")
+    print(f"  {'─'*40}")
+
+    # We need hits per month — reconstruct from all_data
+    word_data = all_data.get(word, {})
+    for m_idx, month in enumerate(months):
+        d = word_data.get(month, {"hits": 0, "total": 0})
+        hits = d["hits"]
+        total = d["total"]
+        rate = rates[m_idx]
+        print(f"  {month:<12} {hits:>8} {total:>8} {rate:>8.4f}")
+
+        all_rows_csv.append({
+            "word": word,
+            "group": group,
+            "period": month,
+            "hits": hits,
+            "total": total,
+            "rate": round(rate, 4),
+        })
+
+    # Save per-word CSV
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", word)
+    word_csv_path = os.path.join(data_dir, f"{safe_name}.csv")
+    with open(word_csv_path, "w") as f:
+        f.write("period,hits,total,rate\n")
+        for m_idx, month in enumerate(months):
+            d = word_data.get(month, {"hits": 0, "total": 0})
+            f.write(f"{month},{d['hits']},{d['total']},{rates[m_idx]:.4f}\n")
+
+# Save combined CSV
+combined_csv_path = os.path.join(OUTPUT_DIR, "all_words_per_period.csv")
+with open(combined_csv_path, "w") as f:
+    f.write("word,group,period,hits,total,rate\n")
+    for row in all_rows_csv:
+        f.write(f"{row['word']},{row['group']},{row['period']},{row['hits']},{row['total']},{row['rate']}\n")
+
+print(f"\nPer-word CSVs saved to {data_dir}/")
+print(f"Combined CSV saved to {combined_csv_path}")
+
+
+# ──────────────────────────────────────────────────────────────
 # 3. GROUP COMPARISON PLOT
 # The money figure: three groups on one chart.
 # ──────────────────────────────────────────────────────────────
