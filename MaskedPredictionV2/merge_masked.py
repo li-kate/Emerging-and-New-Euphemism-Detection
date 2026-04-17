@@ -34,12 +34,31 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
 # ──────────────────────────────────────────────────────────────
-# 1. AGGREGATE PARTIAL FILES
+# 1. AGGREGATE PARTIAL FILES (final results + unfinished checkpoints)
 # ──────────────────────────────────────────────────────────────
-partial_files = sorted(glob.glob("masked_results_*.json"))
-print(f"Found {len(partial_files)} partial files.")
-if not partial_files:
-    print("No partial files found. Exiting.")
+
+# Find all final results
+final_files = sorted(glob.glob("masked_results_*.json"))
+# Find task IDs that have final results
+final_task_ids = set()
+for f in final_files:
+    m = re.search(r"masked_results_(\d+)\.json", f)
+    if m:
+        final_task_ids.add(m.group(1))
+
+# Find checkpoints that DON'T have a corresponding final file
+checkpoint_files = sorted(glob.glob("masked_checkpoint_*.json"))
+orphan_checkpoints = []
+for f in checkpoint_files:
+    m = re.search(r"masked_checkpoint_(\d+)\.json", f)
+    if m and m.group(1) not in final_task_ids:
+        orphan_checkpoints.append(f)
+
+print(f"Found {len(final_files)} completed results + {len(orphan_checkpoints)} unfinished checkpoints.")
+all_files = final_files + orphan_checkpoints
+
+if not all_files:
+    print("No results or checkpoints found. Exiting.")
     exit()
 
 # word -> month -> {hits, total}
@@ -48,13 +67,21 @@ word_groups = {}
 total_stats = {"rows_read": 0, "processed": 0, "total_hits": 0}
 config = {}
 
-for f_path in partial_files:
-    print(f"  Reading {f_path}...", end=" ", flush=True)
+for f_path in all_files:
+    is_checkpoint = "checkpoint" in f_path
+    label = "CHECKPOINT" if is_checkpoint else "final"
+    print(f"  Reading {f_path} ({label})...", end=" ", flush=True)
     try:
         with open(f_path, "r") as f:
             content = json.load(f)
 
-        for word, months in content["data"].items():
+        # Checkpoints store data under "accumulator", final files under "data"
+        data_key = "accumulator" if is_checkpoint else "data"
+        if data_key not in content:
+            print(f"SKIP (no '{data_key}' key)")
+            continue
+
+        for word, months in content[data_key].items():
             for month, counts in months.items():
                 all_data[word][month]["hits"] += counts["hits"]
                 all_data[word][month]["total"] += counts["total"]
@@ -78,6 +105,8 @@ print(f"  Total unique words:  {len(all_data)}")
 print(f"  Total processed:     {total_stats['processed']}")
 print(f"  Total hits:          {total_stats['total_hits']}")
 print(f"  Overall hit rate:    {total_stats['total_hits']/max(1,total_stats['processed']):.4f}")
+if orphan_checkpoints:
+    print(f"  NOTE: {len(orphan_checkpoints)} tasks were incomplete — results are partial for those.")
 
 
 # ──────────────────────────────────────────────────────────────
