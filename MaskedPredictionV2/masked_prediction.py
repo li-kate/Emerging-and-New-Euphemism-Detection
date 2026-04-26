@@ -82,6 +82,12 @@ for w in EUPHEMISM_CANDIDATES:
 for w in COMPARISON_WORDS:
     WORD_GROUPS[w.lower()] = "comparison"
 
+# Spelling variants that should be treated as the same word
+WORD_ALIASES = {
+    "grey death": "gray death",
+    "oui'd": "ouid",
+}
+
 # ──────────────────────────────────────────────────────────────
 # TABOO VOCABULARY
 # Words that indicate drug-related meaning when they appear in
@@ -326,6 +332,9 @@ with open(target_file, "r") as f:
 
         # Mask the word and check predictions
         is_hit, taboo_count = check_taboo_in_predictions(sentence, start, end)
+
+        # Normalize aliases before accumulating
+        word = WORD_ALIASES.get(word.lower(), word.lower())
 
         # Accumulate
         accumulator[word][month]["total"] += 1

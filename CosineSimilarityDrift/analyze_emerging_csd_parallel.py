@@ -72,6 +72,12 @@ for w in EUPHEMISM_CANDIDATES:
 for w in COMPARISON_WORDS:
     WORD_GROUPS[w.lower()] = "comparison"
 
+# Spelling variants that should be treated as the same word
+WORD_ALIASES = {
+    "grey death": "gray death",
+    "oui'd": "ouid",
+}
+
 ANCHOR_TEMPLATES = [
     "They were caught with {}.",
     "The effects of {} can be dangerous.",
@@ -321,8 +327,9 @@ def flush_batch(queue):
             item = queue[i]
             month = get_month_slice(item["timestamp"])
             word_lower = item["candidate"].lower()
+            word_lower = WORD_ALIASES.get(word_lower, word_lower)
 
-            entry = candidate_slices[item["candidate"]][month]
+            entry = candidate_slices[word_lower][month]
             entry["sum_embedding"] += emb
             entry["count"] += 1
             stats["embedded"] += 1
