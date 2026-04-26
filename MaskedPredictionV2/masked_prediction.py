@@ -66,8 +66,9 @@ ANCHORS = [
 ESTABLISHED_EUPHEMISMS = ["molly", "coke", "crystal", "ping"]
 
 EUPHEMISM_CANDIDATES = [
-    "study", "skittles", "zing", "zaza", "christina", "flakka",
-    "yart", "zoom", "fein", "flower", "yimyom", "fenty", "pressed",
+    "zing", "zaza", "flakka", "yart", "fein", "fenty", "pressed",
+    "penjamin", "ouid", "oui'd", "tranq", "gray death", "grey death",
+    "usb stick", "fetty", "tusi", "stamps", "tucibi", "happy water",
 ]
 
 COMPARISON_WORDS = ["needle", "pharmacy", "prescription", "overdose"]
@@ -122,7 +123,11 @@ EXTRA_TABOO = [
     "steroids", "khat", "hash", "hydrocodone", "hydromorphone",
     "promethazine", "buprenorphine", "naloxone", "clonazepam",
     "alprazolam", "flunitrazepam", "methylphenidate",
+    "addict", "addicts", "junkie", "junkies", "fiend", "fiends",
+    "abuser", "abusers", "crackhead", "tweaker", "stoner",
+    "sedative", "tranquilizer"
 ]
+
 for w in EXTRA_TABOO:
     TABOO_VOCAB.add(w.lower())
 
