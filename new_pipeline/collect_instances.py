@@ -42,6 +42,8 @@ Usage:
         --output ./matches/ \
         --slurm-task-id $SLURM_ARRAY_TASK_ID
 
+    # RUN THIS: python3 collect_instances.py --words drug_words.txt anchors_and_baselines.txt comparison_words.txt --reddit-file ./RC_2020-09.zst --output ./matches/2020-09_matches.jsonl
+
 Required: pip install pyahocorasick zstandard
 ============================================================================
 """
