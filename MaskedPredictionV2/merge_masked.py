@@ -12,6 +12,10 @@ The core argument: if a word's taboo hit rate INCREASES over time,
 its contexts are becoming more drug-related — it's an emerging euphemism.
 Static analysis (Zhu et al.) can't distinguish "always drug-related"
 from "becoming drug-related." We can.
+
+TIME GRANULARITY:
+  --half-year flag aggregates months into 6-month bins (YYYY-H1/H2)
+  for smoother trends and less noise. Default is monthly.
 """
 
 import json
@@ -23,14 +27,41 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 import os
 import re
+import argparse
 
 # ──────────────────────────────────────────────────────────────
 # CONFIG
 # ──────────────────────────────────────────────────────────────
-MIN_INSTANCES_PER_MONTH = 5   # Need enough instances for a reliable rate
-MIN_MONTHS = 3                # Need enough months to fit a trend
+MIN_INSTANCES_PER_PERIOD = 5   # Need enough instances for a reliable rate
+MIN_PERIODS = 3                # Need enough periods to fit a trend
 OUTPUT_DIR = "masked_results"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--half-year", action="store_true",
+    help="Aggregate into 6-month bins (YYYY-H1/H2) instead of monthly"
+)
+args = parser.parse_args()
+USE_HALF_YEAR = args.half_year
+
+if USE_HALF_YEAR:
+    print("Mode: HALF-YEAR aggregation")
+else:
+    print("Mode: MONTHLY (default)")
+
+
+# ──────────────────────────────────────────────────────────────
+# HALF-YEAR HELPERS
+# ──────────────────────────────────────────────────────────────
+def month_to_half_year(month_str):
+    """Convert 'YYYY-MM' to 'YYYY-H1' or 'YYYY-H2'."""
+    try:
+        year, month = month_str.split("-")
+        half = "H1" if int(month) <= 6 else "H2"
+        return f"{year}-{half}"
+    except Exception:
+        return "unknown"
 
 
 # ──────────────────────────────────────────────────────────────
@@ -100,6 +131,17 @@ for f_path in all_files:
     except Exception as e:
         print(f"ERROR: {e}")
 
+# Apply half-year aggregation if requested
+if USE_HALF_YEAR:
+    print("\nAggregating to half-year periods...")
+    aggregated_data = defaultdict(lambda: defaultdict(lambda: {"hits": 0, "total": 0}))
+    for word, months_data in all_data.items():
+        for month, data in months_data.items():
+            period = month_to_half_year(month)
+            aggregated_data[word][period]["hits"] += data["hits"]
+            aggregated_data[word][period]["total"] += data["total"]
+    all_data = aggregated_data
+
 print(f"\nMerge complete.")
 print(f"  Total unique words:  {len(all_data)}")
 print(f"  Total processed:     {total_stats['processed']}")
@@ -112,38 +154,39 @@ if orphan_checkpoints:
 # ──────────────────────────────────────────────────────────────
 # 2. COMPUTE PER-WORD TABOO RATE TIME SERIES
 # ──────────────────────────────────────────────────────────────
-print(f"\nAnalyzing trends (min {MIN_INSTANCES_PER_MONTH} instances/month, min {MIN_MONTHS} months)...")
+time_label = "half_year" if USE_HALF_YEAR else "monthly"
+print(f"\nAnalyzing trends (min {MIN_INSTANCES_PER_PERIOD} instances/period, min {MIN_PERIODS} periods)...")
 
-plot_dir = os.path.join(OUTPUT_DIR, "plots_per_word")
+plot_dir = os.path.join(OUTPUT_DIR, f"plots_per_word_{time_label}")
 os.makedirs(plot_dir, exist_ok=True)
 
 results = []
 
-for word, months_data in sorted(all_data.items()):
+for word, periods_data in sorted(all_data.items()):
     group = word_groups.get(word.lower(), "unknown")
 
-    # Skip anchors — we don't need to check if "cocaine" predicts drug words
+    # Skip anchors
     if group == "anchor":
         continue
 
-    # Filter months with enough instances
-    valid_months = {
-        m: d for m, d in months_data.items()
-        if d["total"] >= MIN_INSTANCES_PER_MONTH and m != "unknown"
+    # Filter periods with enough instances
+    valid_periods = {
+        m: d for m, d in periods_data.items()
+        if d["total"] >= MIN_INSTANCES_PER_PERIOD and m != "unknown"
     }
 
-    time_keys = sorted(valid_months.keys())
-    if len(time_keys) < MIN_MONTHS:
+    time_keys = sorted(valid_periods.keys())
+    if len(time_keys) < MIN_PERIODS:
         continue
 
-    months = []
+    periods = []
     rates = []
     counts = []
 
-    for month in time_keys:
-        d = valid_months[month]
+    for period in time_keys:
+        d = valid_periods[period]
         rate = d["hits"] / d["total"]
-        months.append(month)
+        periods.append(period)
         rates.append(rate)
         counts.append(d["total"])
 
@@ -159,9 +202,9 @@ for word, months_data in sorted(all_data.items()):
     results.append({
         "word": word,
         "group": group,
-        "n_months": len(months),
+        "n_periods": len(periods),
         "total_instances": sum(counts),
-        "months": months,
+        "periods": periods,
         "rates": rates,
         "counts": counts,
         "mean_rate": round(mean_rate, 4),
@@ -173,22 +216,23 @@ for word, months_data in sorted(all_data.items()):
     # ── Per-word plot ──
     fig, ax1 = plt.subplots(figsize=(12, 5))
 
-    ax1.plot(months, rates, marker="o", color="crimson", linewidth=2, markersize=5)
+    ax1.plot(range(len(periods)), rates, marker="o", color="crimson", linewidth=2, markersize=5)
     ax1.set_ylabel("Taboo Hit Rate (fraction)", color="crimson")
     ax1.tick_params(axis="y", labelcolor="crimson")
     ax1.set_ylim(-0.05, 1.05)
-    ax1.set_xlabel("Month")
+    ax1.set_xlabel("Time Period")
     ax1.set_title(
         f"Masked Prediction Shift: \"{word}\" [{group}]  "
         f"(slope={slope:.4f}, mean={mean_rate:.3f}, n={sum(counts)})"
     )
+    ax1.set_xticks(range(len(periods)))
+    ax1.set_xticklabels(periods, rotation=45, ha="right")
 
     ax2 = ax1.twinx()
-    ax2.bar(months, counts, alpha=0.15, color="gray")
-    ax2.set_ylabel("Monthly Instances", color="gray")
+    ax2.bar(range(len(periods)), counts, alpha=0.15, color="gray")
+    ax2.set_ylabel("Instances", color="gray")
     ax2.tick_params(axis="y", labelcolor="gray")
 
-    plt.xticks(rotation=45, ha="right")
     ax1.grid(True, alpha=0.2)
     fig.tight_layout()
 
@@ -202,16 +246,15 @@ print(f"Per-word plots saved to {plot_dir}/")
 # ──────────────────────────────────────────────────────────────
 # 2b. PRINT AND SAVE PER-WORD BIN DATA
 # ──────────────────────────────────────────────────────────────
-data_dir = os.path.join(OUTPUT_DIR, "data_per_word")
+data_dir = os.path.join(OUTPUT_DIR, f"data_per_word_{time_label}")
 os.makedirs(data_dir, exist_ok=True)
 
-# Also build one big CSV with all words
 all_rows_csv = []
 
 for r in results:
     word = r["word"]
     group = r["group"]
-    months = r["months"]
+    periods = r["periods"]
     rates = r["rates"]
     counts = r["counts"]
 
@@ -220,19 +263,18 @@ for r in results:
     print(f"  {'Period':<12} {'Hits':>8} {'Total':>8} {'Rate':>8}")
     print(f"  {'─'*40}")
 
-    # We need hits per month — reconstruct from all_data
     word_data = all_data.get(word, {})
-    for m_idx, month in enumerate(months):
-        d = word_data.get(month, {"hits": 0, "total": 0})
+    for m_idx, period in enumerate(periods):
+        d = word_data.get(period, {"hits": 0, "total": 0})
         hits = d["hits"]
         total = d["total"]
         rate = rates[m_idx]
-        print(f"  {month:<12} {hits:>8} {total:>8} {rate:>8.4f}")
+        print(f"  {period:<12} {hits:>8} {total:>8} {rate:>8.4f}")
 
         all_rows_csv.append({
             "word": word,
             "group": group,
-            "period": month,
+            "period": period,
             "hits": hits,
             "total": total,
             "rate": round(rate, 4),
@@ -243,12 +285,12 @@ for r in results:
     word_csv_path = os.path.join(data_dir, f"{safe_name}.csv")
     with open(word_csv_path, "w") as f:
         f.write("period,hits,total,rate\n")
-        for m_idx, month in enumerate(months):
-            d = word_data.get(month, {"hits": 0, "total": 0})
-            f.write(f"{month},{d['hits']},{d['total']},{rates[m_idx]:.4f}\n")
+        for m_idx, period in enumerate(periods):
+            d = word_data.get(period, {"hits": 0, "total": 0})
+            f.write(f"{period},{d['hits']},{d['total']},{rates[m_idx]:.4f}\n")
 
 # Save combined CSV
-combined_csv_path = os.path.join(OUTPUT_DIR, "all_words_per_period.csv")
+combined_csv_path = os.path.join(OUTPUT_DIR, f"all_words_per_period_{time_label}.csv")
 with open(combined_csv_path, "w") as f:
     f.write("word,group,period,hits,total,rate\n")
     for row in all_rows_csv:
@@ -260,13 +302,12 @@ print(f"Combined CSV saved to {combined_csv_path}")
 
 # ──────────────────────────────────────────────────────────────
 # 3. GROUP COMPARISON PLOT
-# The money figure: three groups on one chart.
 # ──────────────────────────────────────────────────────────────
 def make_group_plot():
-    plot_path = os.path.join(OUTPUT_DIR, "group_comparison_masked.png")
+    plot_path = os.path.join(OUTPUT_DIR, f"group_comparison_masked_{time_label}.png")
 
-    all_months_set = sorted(set(m for r in results for m in r["months"]))
-    month_to_idx = {m: i for i, m in enumerate(all_months_set)}
+    all_periods_set = sorted(set(m for r in results for m in r["periods"]))
+    period_to_idx = {m: i for i, m in enumerate(all_periods_set)}
 
     group_colors = {
         "euphemism_candidate": ("crimson", "Euphemism Candidates"),
@@ -281,33 +322,33 @@ def make_group_plot():
         if not group_results:
             continue
 
-        # Build matrix: (n_words, n_months) with NaN for missing
-        rate_grid = np.full((len(group_results), len(all_months_set)), np.nan)
+        rate_grid = np.full((len(group_results), len(all_periods_set)), np.nan)
         for w_idx, r in enumerate(group_results):
-            for m_idx, month in enumerate(r["months"]):
-                global_idx = month_to_idx[month]
+            for m_idx, period in enumerate(r["periods"]):
+                global_idx = period_to_idx[period]
                 rate_grid[w_idx, global_idx] = r["rates"][m_idx]
 
         mean_line = np.nanmean(rate_grid, axis=0)
         std_line = np.nanstd(rate_grid, axis=0)
 
         valid = ~np.isnan(mean_line)
-        valid_months = [all_months_set[i] for i in range(len(all_months_set)) if valid[i]]
+        valid_indices = [i for i in range(len(all_periods_set)) if valid[i]]
         valid_mean = mean_line[valid]
         valid_std = std_line[valid]
 
-        ax.plot(valid_months, valid_mean, marker="o", color=color,
+        ax.plot(valid_indices, valid_mean, marker="o", color=color,
                 linewidth=2, markersize=4, label=f"{group_label} (n={len(group_results)})")
-        ax.fill_between(valid_months, valid_mean - valid_std, valid_mean + valid_std,
+        ax.fill_between(valid_indices, valid_mean - valid_std, valid_mean + valid_std,
                         color=color, alpha=0.1)
 
     ax.set_ylabel("Taboo Hit Rate (fraction of contexts with drug prediction)")
-    ax.set_xlabel("Month")
+    ax.set_xlabel("Time Period")
     ax.set_title("Masked Prediction Shift: Group Comparison")
     ax.set_ylim(-0.05, 1.05)
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.2)
-    plt.xticks(rotation=45, ha="right")
+    ax.set_xticks(range(len(all_periods_set)))
+    ax.set_xticklabels(all_periods_set, rotation=45, ha="right")
     fig.tight_layout()
     plt.savefig(plot_path, dpi=150)
     plt.close()
@@ -327,7 +368,7 @@ for r in results_sorted:
     summary.append({
         "word": r["word"],
         "group": r["group"],
-        "n_months": r["n_months"],
+        "n_periods": r["n_periods"],
         "total_instances": r["total_instances"],
         "mean_rate": r["mean_rate"],
         "std_rate": r["std_rate"],
@@ -335,7 +376,7 @@ for r in results_sorted:
         "drift": r["drift"],
     })
 
-summary_path = os.path.join(OUTPUT_DIR, "masked_drift_summary.json")
+summary_path = os.path.join(OUTPUT_DIR, f"masked_drift_summary_{time_label}.json")
 with open(summary_path, "w") as f:
     json.dump(summary, f, indent=2)
 print(f"\nSummary saved: {summary_path} ({len(summary)} words)")
@@ -361,7 +402,7 @@ for group_name in ["euphemism_candidate", "established_euphemism", "comparison"]
 # ──────────────────────────────────────────────────────────────
 # 5. COMPARISON WITH COSINE SIMILARITY (if available)
 # ──────────────────────────────────────────────────────────────
-cosine_summary_path = "results/drift_summary_template.json"
+cosine_summary_path = f"results/drift_summary_template_{time_label}.json"
 if os.path.exists(cosine_summary_path):
     print(f"\n{'='*60}")
     print("Cross-method comparison (masked prediction vs cosine similarity)")

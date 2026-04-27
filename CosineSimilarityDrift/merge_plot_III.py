@@ -18,6 +18,10 @@ Group comparison plot shows the core argument:
 Uses TWO centroid types for robustness:
   Option A (template): fixed reference from canonical sentences
   Option B (corpus): derived from real Reddit contexts of anchor words
+
+TIME GRANULARITY:
+  --half-year flag aggregates months into 6-month bins (YYYY-H1/H2)
+  for smoother trends and less noise. Default is monthly.
 """
 
 import json
@@ -31,15 +35,56 @@ from sklearn.metrics.pairwise import cosine_similarity
 from scipy import stats as scipy_stats
 import os
 import re
+import argparse
 
 # ──────────────────────────────────────────────────────────────
 # CONFIG
 # ──────────────────────────────────────────────────────────────
 HIDDEN_DIM = 768
-MIN_INSTANCES_PER_MONTH = 5
-MIN_MONTHS = 3
+MIN_INSTANCES_PER_PERIOD = 5
+MIN_PERIODS = 3
 OUTPUT_DIR = "results"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--half-year", action="store_true",
+    help="Aggregate into 6-month bins (YYYY-H1/H2) instead of monthly"
+)
+args = parser.parse_args()
+USE_HALF_YEAR = args.half_year
+
+if USE_HALF_YEAR:
+    print("Mode: HALF-YEAR aggregation")
+else:
+    print("Mode: MONTHLY (default)")
+
+
+# ──────────────────────────────────────────────────────────────
+# HALF-YEAR HELPERS
+# ──────────────────────────────────────────────────────────────
+def month_to_half_year(month_str):
+    """Convert 'YYYY-MM' to 'YYYY-H1' or 'YYYY-H2'."""
+    try:
+        year, month = month_str.split("-")
+        half = "H1" if int(month) <= 6 else "H2"
+        return f"{year}-{half}"
+    except Exception:
+        return "unknown"
+
+
+def aggregate_to_half_year(word_data):
+    """
+    Re-aggregate monthly sum/count data into half-year bins.
+    word_data: month -> {sum: np.array, count: int}
+    Returns: half_year -> {sum: np.array, count: int}
+    """
+    aggregated = defaultdict(lambda: {"sum": np.zeros(HIDDEN_DIM), "count": 0})
+    for month, data in word_data.items():
+        period = month_to_half_year(month)
+        aggregated[period]["sum"] += data["sum"]
+        aggregated[period]["count"] += data["count"]
+    return dict(aggregated)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -99,6 +144,18 @@ for f_path in partial_files:
     except Exception as e:
         print(f"ERROR: {e}")
 
+# Apply half-year aggregation if requested
+if USE_HALF_YEAR:
+    print("\nAggregating to half-year periods...")
+    aggregated_data = {}
+    for word, month_data in all_data.items():
+        aggregated_data[word] = defaultdict(lambda: {"sum": np.zeros(HIDDEN_DIM), "count": 0})
+        for month, data in month_data.items():
+            period = month_to_half_year(month)
+            aggregated_data[word][period]["sum"] += data["sum"]
+            aggregated_data[word][period]["count"] += data["count"]
+    all_data = aggregated_data
+
 print(f"\nMerge complete.")
 print(f"  Total unique words: {len(all_data)}")
 print(f"  Total embedded:     {total_stats['embedded']}")
@@ -137,8 +194,9 @@ def run_analysis(anchor_embeddings, label):
     print(f"Analysis: {label}")
     print(f"{'='*60}")
 
-    plot_dir_main = os.path.join(OUTPUT_DIR, f"plots_{label}_centroid")
-    plot_dir_anchors = os.path.join(OUTPUT_DIR, f"plots_{label}_per_anchor")
+    time_label = "half_year" if USE_HALF_YEAR else "monthly"
+    plot_dir_main = os.path.join(OUTPUT_DIR, f"plots_{label}_centroid_{time_label}")
+    plot_dir_anchors = os.path.join(OUTPUT_DIR, f"plots_{label}_per_anchor_{time_label}")
     os.makedirs(plot_dir_main, exist_ok=True)
     os.makedirs(plot_dir_anchors, exist_ok=True)
 
@@ -158,23 +216,23 @@ def run_analysis(anchor_embeddings, label):
         if group == "anchor":
             continue
 
-        # Filter months
-        valid_months = {
+        # Filter periods
+        valid_periods = {
             m: d for m, d in slices.items()
-            if d["count"] >= MIN_INSTANCES_PER_MONTH and m != "unknown"
+            if d["count"] >= MIN_INSTANCES_PER_PERIOD and m != "unknown"
         }
-        time_keys = sorted(valid_months.keys())
-        if len(time_keys) < MIN_MONTHS:
+        time_keys = sorted(valid_periods.keys())
+        if len(time_keys) < MIN_PERIODS:
             continue
 
         # ── Compute similarities ──
-        months = []
+        periods = []
         centroid_sims = []       # PRIMARY: similarity to drug centroid
         all_anchor_sims = []     # SECONDARY: similarity to each anchor
         counts = []
 
-        for month in time_keys:
-            data = valid_months[month]
+        for period in time_keys:
+            data = valid_periods[period]
             mean_emb = (data["sum"] / data["count"]).reshape(1, -1)
 
             # Primary: similarity to centroid
@@ -183,13 +241,13 @@ def run_analysis(anchor_embeddings, label):
             # Secondary: similarity to all anchors
             a_sims = cosine_similarity(mean_emb, anchor_matrix)[0]  # (n_anchors,)
 
-            months.append(month)
+            periods.append(period)
             centroid_sims.append(c_sim)
             all_anchor_sims.append(a_sims)
             counts.append(data["count"])
 
         centroid_sims = np.array(centroid_sims)
-        sim_matrix = np.array(all_anchor_sims)  # (n_months, n_anchors)
+        sim_matrix = np.array(all_anchor_sims)  # (n_periods, n_anchors)
 
         # ── Primary stats: centroid drift ──
         x = np.arange(len(centroid_sims), dtype=float)
@@ -229,9 +287,9 @@ def run_analysis(anchor_embeddings, label):
         results.append({
             "word": word,
             "group": group,
-            "n_months": len(months),
+            "n_periods": len(periods),
             "total_instances": sum(counts),
-            "months": months,
+            "periods": periods,
             "counts": counts,
             # PRIMARY: centroid similarity
             "centroid_sims": centroid_sims.tolist(),
@@ -239,10 +297,9 @@ def run_analysis(anchor_embeddings, label):
             "centroid_drift": round(centroid_drift, 4),
             "centroid_mean_sim": round(centroid_mean, 4),
             "centroid_std_sim": round(centroid_std, 4),
-            "centroid_r": round(centroid_r, 4),       # Pearson correlation
-            "centroid_p": round(centroid_p, 4),       # p-value (< 0.05 = significant)
-            "centroid_significant": centroid_p < 0.05, # Quick flag
-            # SECONDARY: per-anchor
+            "centroid_r": round(centroid_r, 4),
+            "centroid_p": round(centroid_p, 4),
+            "centroid_significant": centroid_p < 0.05,
             "best_anchor": best_anchor,
             "best_anchor_mean_sim": round(float(mean_sims_per_anchor[best_anchor_idx]), 4),
             "best_anchor_slope": round(best_slope, 6),
@@ -256,22 +313,23 @@ def run_analysis(anchor_embeddings, label):
 
         # ── PRIMARY PLOT: word vs drug centroid over time ──
         fig, ax1 = plt.subplots(figsize=(12, 5))
-        ax1.plot(months, centroid_sims, marker="o", color="royalblue",
+        ax1.plot(range(len(periods)), centroid_sims, marker="o", color="royalblue",
                  linewidth=2, markersize=5)
         ax1.set_ylabel("Cosine Similarity to Drug Centroid", color="royalblue")
         ax1.tick_params(axis="y", labelcolor="royalblue")
-        ax1.set_xlabel("Month")
+        ax1.set_xlabel("Time Period")
         ax1.set_title(
             f"\"{word}\" [{group}] — Drug Centroid Drift [{label}]  "
             f"(slope={centroid_slope:.4f}, r={centroid_r:.3f}, p={centroid_p:.3f}, n={sum(counts)})"
         )
+        ax1.set_xticks(range(len(periods)))
+        ax1.set_xticklabels(periods, rotation=45, ha="right")
 
         ax2 = ax1.twinx()
-        ax2.bar(months, counts, alpha=0.15, color="gray")
-        ax2.set_ylabel("Monthly Instances", color="gray")
+        ax2.bar(range(len(periods)), counts, alpha=0.15, color="gray")
+        ax2.set_ylabel("Instances", color="gray")
         ax2.tick_params(axis="y", labelcolor="gray")
 
-        plt.xticks(rotation=45, ha="right")
         ax1.grid(True, alpha=0.2)
         fig.tight_layout()
 
@@ -289,22 +347,23 @@ def run_analysis(anchor_embeddings, label):
             a_sims = sim_matrix[:, a_idx]
             a_slope = slopes_per_anchor[a_idx]
             ax1.plot(
-                months, a_sims, marker="o", color=colors[rank],
+                range(len(periods)), a_sims, marker="o", color=colors[rank],
                 linewidth=2, markersize=4,
                 label=f"{a_name} (slope={a_slope:.4f})",
             )
 
         ax1.set_ylabel("Cosine Similarity to Individual Anchor")
-        ax1.set_xlabel("Month")
+        ax1.set_xlabel("Time Period")
         ax1.set_title(f"\"{word}\" [{group}] — Top 3 Anchors [{label}]")
         ax1.legend(loc="upper left", fontsize=8)
+        ax1.set_xticks(range(len(periods)))
+        ax1.set_xticklabels(periods, rotation=45, ha="right")
 
         ax2 = ax1.twinx()
-        ax2.bar(months, counts, alpha=0.15, color="gray")
-        ax2.set_ylabel("Monthly Instances", color="gray")
+        ax2.bar(range(len(periods)), counts, alpha=0.15, color="gray")
+        ax2.set_ylabel("Instances", color="gray")
         ax2.tick_params(axis="y", labelcolor="gray")
 
-        plt.xticks(rotation=45, ha="right")
         ax1.grid(True, alpha=0.2)
         fig.tight_layout()
 
@@ -339,13 +398,13 @@ def make_group_plot(results, label):
     Candidates should rise, established should be flat-high,
     comparison should be flat-low.
     """
-    plot_path = os.path.join(OUTPUT_DIR, f"group_comparison_{label}.png")
+    time_label = "half_year" if USE_HALF_YEAR else "monthly"
+    plot_path = os.path.join(OUTPUT_DIR, f"group_comparison_{label}_{time_label}.png")
 
-    # Collect all unique months across all words
-    all_months = sorted(set(
-        m for r in results for m in r["months"]
+    all_periods = sorted(set(
+        m for r in results for m in r["periods"]
     ))
-    month_to_idx = {m: i for i, m in enumerate(all_months)}
+    period_to_idx = {m: i for i, m in enumerate(all_periods)}
 
     group_colors = {
         "euphemism_candidate": ("royalblue", "Euphemism Candidates"),
@@ -360,35 +419,35 @@ def make_group_plot(results, label):
         if not group_results:
             continue
 
-        # Build a matrix: (n_words, n_months) with NaN for missing
-        sim_grid = np.full((len(group_results), len(all_months)), np.nan)
+        sim_grid = np.full((len(group_results), len(all_periods)), np.nan)
         for w_idx, r in enumerate(group_results):
-            for m_idx, month in enumerate(r["months"]):
-                global_idx = month_to_idx[month]
-                # USE CENTROID SIMS (primary metric)
+            for m_idx, period in enumerate(r["periods"]):
+                global_idx = period_to_idx[period]
                 sim_grid[w_idx, global_idx] = r["centroid_sims"][m_idx]
 
-        # Average across words for each month (ignoring NaN)
+        # Average across words for each period (ignoring NaN)
         mean_line = np.nanmean(sim_grid, axis=0)
         std_line = np.nanstd(sim_grid, axis=0)
 
-        # Only plot months where we have at least 1 word
+        # Only plot period where we have at least 1 word
         valid = ~np.isnan(mean_line)
-        valid_months = [all_months[i] for i in range(len(all_months)) if valid[i]]
+        valid_indices = [i for i in range(len(all_periods)) if valid[i]]
+        valid_periods = [all_periods[i] for i in valid_indices]
         valid_mean = mean_line[valid]
         valid_std = std_line[valid]
 
-        ax.plot(valid_months, valid_mean, marker="o", color=color,
+        ax.plot(valid_indices, valid_mean, marker="o", color=color,
                 linewidth=2, markersize=4, label=f"{group_label} (n={len(group_results)})")
-        ax.fill_between(valid_months, valid_mean - valid_std, valid_mean + valid_std,
+        ax.fill_between(valid_indices, valid_mean - valid_std, valid_mean + valid_std,
                         color=color, alpha=0.1)
 
     ax.set_ylabel("Cosine Similarity to Drug Centroid")
-    ax.set_xlabel("Month")
+    ax.set_xlabel("Time Period")
     ax.set_title(f"Group Comparison [{label}]: Euphemism Emergence Signal")
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.2)
-    plt.xticks(rotation=45, ha="right")
+    ax.set_xticks(range(len(all_periods)))
+    ax.set_xticklabels(all_periods, rotation=45, ha="right")
     fig.tight_layout()
     plt.savefig(plot_path, dpi=150)
     plt.close()
@@ -405,7 +464,7 @@ if results_b:
 # ──────────────────────────────────────────────────────────────
 def save_summary(results, label):
     """Save summary JSON and print results by group."""
-    # Sort by centroid slope descending (primary metric)
+    time_label = "half_year" if USE_HALF_YEAR else "monthly"
     results_sorted = sorted(results, key=lambda r: r["centroid_slope"], reverse=True)
 
     # Clean up for JSON
@@ -414,7 +473,7 @@ def save_summary(results, label):
         summary.append({
             "word": r["word"],
             "group": r["group"],
-            "n_months": r["n_months"],
+            "n_periods": r["n_periods"],
             "total_instances": r["total_instances"],
             # PRIMARY: centroid
             "centroid_mean_sim": r["centroid_mean_sim"],
@@ -432,7 +491,7 @@ def save_summary(results, label):
             "per_anchor_mean_sim": r["per_anchor_mean_sim"],
         })
 
-    out_path = os.path.join(OUTPUT_DIR, f"drift_summary_{label}.json")
+    out_path = os.path.join(OUTPUT_DIR, f"drift_summary_{label}_{time_label}.json")
     with open(out_path, "w") as f:
         json.dump(summary, f, indent=2)
     print(f"\nSaved: {out_path} ({len(summary)} words)")
