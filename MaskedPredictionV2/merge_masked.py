@@ -37,6 +37,13 @@ MIN_PERIODS = 3                # Need enough periods to fit a trend
 OUTPUT_DIR = "masked_results"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# Spelling variants — merge these before analysis
+WORD_ALIASES = {
+    "grey death": "gray death",
+    "oui'd": "ouid",
+    "oui\u2019d": "ouid",
+}
+
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "--half-year", action="store_true",
@@ -113,9 +120,10 @@ for f_path in all_files:
             continue
 
         for word, months in content[data_key].items():
+            word_normalized = WORD_ALIASES.get(word.lower(), word.lower())
             for month, counts in months.items():
-                all_data[word][month]["hits"] += counts["hits"]
-                all_data[word][month]["total"] += counts["total"]
+                all_data[word_normalized][month]["hits"] += counts["hits"]
+                all_data[word_normalized][month]["total"] += counts["total"]
 
         if "word_groups" in content:
             word_groups.update(content["word_groups"])

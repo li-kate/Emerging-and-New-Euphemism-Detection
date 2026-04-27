@@ -46,6 +46,13 @@ MIN_PERIODS = 3
 OUTPUT_DIR = "results"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# Spelling variants — merge these before analysis
+WORD_ALIASES = {
+    "grey death": "gray death",
+    "oui'd": "ouid",
+    "oui\u2019d": "ouid",
+}
+
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "--half-year", action="store_true",
@@ -115,8 +122,9 @@ for f_path in partial_files:
 
         # Accumulate word embeddings
         for cand, slices in content["data"].items():
+            cand_normalized = WORD_ALIASES.get(cand.lower(), cand.lower())
             for month, stats in slices.items():
-                entry = all_data[cand][month]
+                entry = all_data[cand_normalized][month]
                 entry["sum"] += np.array(stats["sum_embedding"])
                 entry["count"] += stats["count"]
 
@@ -291,7 +299,6 @@ def run_analysis(anchor_embeddings, label):
             "total_instances": sum(counts),
             "periods": periods,
             "counts": counts,
-            # PRIMARY: centroid similarity
             "centroid_sims": centroid_sims.tolist(),
             "centroid_slope": round(centroid_slope, 6),
             "centroid_drift": round(centroid_drift, 4),
@@ -389,14 +396,11 @@ else:
 
 # ──────────────────────────────────────────────────────────────
 # 5. GROUP COMPARISON PLOT
-# Shows all three groups on one chart to make the core argument.
 # ──────────────────────────────────────────────────────────────
 def make_group_plot(results, label):
     """
     PRIMARY FIGURE for the paper.
     Average centroid similarity time series within each group.
-    Candidates should rise, established should be flat-high,
-    comparison should be flat-low.
     """
     time_label = "half_year" if USE_HALF_YEAR else "monthly"
     plot_path = os.path.join(OUTPUT_DIR, f"group_comparison_{label}_{time_label}.png")
@@ -432,7 +436,6 @@ def make_group_plot(results, label):
         # Only plot period where we have at least 1 word
         valid = ~np.isnan(mean_line)
         valid_indices = [i for i in range(len(all_periods)) if valid[i]]
-        valid_periods = [all_periods[i] for i in valid_indices]
         valid_mean = mean_line[valid]
         valid_std = std_line[valid]
 
