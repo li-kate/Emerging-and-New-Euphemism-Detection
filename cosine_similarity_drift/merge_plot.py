@@ -324,6 +324,7 @@ def run_analysis(anchor_embeddings, label):
                  linewidth=2, markersize=5)
         ax1.set_ylabel("Cosine Similarity to Drug Centroid", color="royalblue")
         ax1.tick_params(axis="y", labelcolor="royalblue")
+        ax1.set_ylim(0.0, 1.0)
         ax1.set_xlabel("Time Period")
         ax1.set_title(
             f"\"{word}\" [{group}] — Drug Centroid Drift [{label}]  "
@@ -360,6 +361,7 @@ def run_analysis(anchor_embeddings, label):
             )
 
         ax1.set_ylabel("Cosine Similarity to Individual Anchor")
+        ax1.set_ylim(0.0, 1.0)
         ax1.set_xlabel("Time Period")
         ax1.set_title(f"\"{word}\" [{group}] — Top 3 Anchors [{label}]")
         ax1.legend(loc="upper left", fontsize=8)
@@ -445,6 +447,7 @@ def make_group_plot(results, label):
                         color=color, alpha=0.1)
 
     ax.set_ylabel("Cosine Similarity to Drug Centroid")
+    ax.set_ylim(0.0, 1.0)
     ax.set_xlabel("Time Period")
     ax.set_title(f"Group Comparison [{label}]: Euphemism Emergence Signal")
     ax.legend(fontsize=9)
