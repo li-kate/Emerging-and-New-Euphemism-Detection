@@ -5,7 +5,7 @@ import html
 from googleapiclient.discovery import build
 
 # --- CONFIGURATION ---
-API_KEY = 'AIzaSyAFHTcRHuSEnhlniS7xyjzZT_gXP7oO4Gs' 
+API_KEY = '<API_KEY>' 
 DAY_NUMBER = 5  # Change this (1, 2, 3, 4, 5) to process different words each day
 COMMENTS_PER_VIDEO = 500 
 VIDEOS_PER_WORD = 30
