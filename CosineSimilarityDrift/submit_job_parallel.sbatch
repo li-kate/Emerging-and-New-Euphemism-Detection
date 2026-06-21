@@ -7,7 +7,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --time=12:00:00
 #SBATCH --array=0-10
-#SBATCH --output=logs2/array_%A_%a.ou
+#SBATCH --output=logs2/array_%A_%a.out
 
 # ============================================================================
 # SETUP
