@@ -1,27 +1,24 @@
-import os
 import glob
+import os
 
-INPUT_DIR = "./"   # change if needed
+INPUT_DIR = "./"  # change if needed
 OUTPUT_DIR = "./merged"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
 def merge_files(rc_path, rs_path, output_path):
     with open(output_path, "w", encoding="utf-8") as out:
-
         # write comments first
         if os.path.exists(rc_path):
             print(f"Adding RC: {rc_path}")
             with open(rc_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    out.write(line)
+                out.writelines(f)
 
         # then submissions
         if os.path.exists(rs_path):
             print(f"Adding RS: {rs_path}")
             with open(rs_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    out.write(line)
+                out.writelines(f)
 
     print(f"Saved → {output_path}\n")
 

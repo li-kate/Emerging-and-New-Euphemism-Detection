@@ -23,3 +23,4 @@ matplotlib>=3.7.0
 # ── BERT / transformer models (analyze_emerging_csd.py, masked_prediction.py) ──
 torch>=2.0.0
 transformers>=4.30.0
+ruff

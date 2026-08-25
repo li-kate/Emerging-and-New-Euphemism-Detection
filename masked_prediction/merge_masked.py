@@ -18,22 +18,25 @@ TIME GRANULARITY:
   for smoother trends and less noise. Default is monthly.
 """
 
-import json
 import glob
-import numpy as np
+import json
+
 import matplotlib
+import numpy as np
+
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from collections import defaultdict
+import argparse
 import os
 import re
-import argparse
+from collections import defaultdict
+
+import matplotlib.pyplot as plt
 
 # ──────────────────────────────────────────────────────────────
 # CONFIG
 # ──────────────────────────────────────────────────────────────
-MIN_INSTANCES_PER_PERIOD = 5   # Need enough instances for a reliable rate
-MIN_PERIODS = 3                # Need enough periods to fit a trend
+MIN_INSTANCES_PER_PERIOD = 5  # Need enough instances for a reliable rate
+MIN_PERIODS = 3  # Need enough periods to fit a trend
 OUTPUT_DIR = "masked_results"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -46,8 +49,9 @@ WORD_ALIASES = {
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
-    "--half-year", action="store_true",
-    help="Aggregate into 6-month bins (YYYY-H1/H2) instead of monthly"
+    "--half-year",
+    action="store_true",
+    help="Aggregate into 6-month bins (YYYY-H1/H2) instead of monthly",
 )
 args = parser.parse_args()
 USE_HALF_YEAR = args.half_year
@@ -92,7 +96,9 @@ for f in checkpoint_files:
     if m and m.group(1) not in final_task_ids:
         orphan_checkpoints.append(f)
 
-print(f"Found {len(final_files)} completed results + {len(orphan_checkpoints)} unfinished checkpoints.")
+print(
+    f"Found {len(final_files)} completed results + {len(orphan_checkpoints)} unfinished checkpoints."
+)
 all_files = final_files + orphan_checkpoints
 
 if not all_files:
@@ -150,20 +156,26 @@ if USE_HALF_YEAR:
             aggregated_data[word][period]["total"] += data["total"]
     all_data = aggregated_data
 
-print(f"\nMerge complete.")
+print("\nMerge complete.")
 print(f"  Total unique words:  {len(all_data)}")
 print(f"  Total processed:     {total_stats['processed']}")
 print(f"  Total hits:          {total_stats['total_hits']}")
-print(f"  Overall hit rate:    {total_stats['total_hits']/max(1,total_stats['processed']):.4f}")
+print(
+    f"  Overall hit rate:    {total_stats['total_hits'] / max(1, total_stats['processed']):.4f}"
+)
 if orphan_checkpoints:
-    print(f"  NOTE: {len(orphan_checkpoints)} tasks were incomplete — results are partial for those.")
+    print(
+        f"  NOTE: {len(orphan_checkpoints)} tasks were incomplete — results are partial for those."
+    )
 
 
 # ──────────────────────────────────────────────────────────────
 # 2. COMPUTE PER-WORD TABOO RATE TIME SERIES
 # ──────────────────────────────────────────────────────────────
 time_label = "half_year" if USE_HALF_YEAR else "monthly"
-print(f"\nAnalyzing trends (min {MIN_INSTANCES_PER_PERIOD} instances/period, min {MIN_PERIODS} periods)...")
+print(
+    f"\nAnalyzing trends (min {MIN_INSTANCES_PER_PERIOD} instances/period, min {MIN_PERIODS} periods)..."
+)
 
 plot_dir = os.path.join(OUTPUT_DIR, f"plots_per_word_{time_label}")
 os.makedirs(plot_dir, exist_ok=True)
@@ -179,7 +191,8 @@ for word, periods_data in sorted(all_data.items()):
 
     # Filter periods with enough instances
     valid_periods = {
-        m: d for m, d in periods_data.items()
+        m: d
+        for m, d in periods_data.items()
         if d["total"] >= MIN_INSTANCES_PER_PERIOD and m != "unknown"
     }
 
@@ -207,30 +220,39 @@ for word, periods_data in sorted(all_data.items()):
     mean_rate = float(np.mean(rates_arr))
     std_rate = float(np.std(rates_arr))
 
-    results.append({
-        "word": word,
-        "group": group,
-        "n_periods": len(periods),
-        "total_instances": sum(counts),
-        "periods": periods,
-        "rates": rates,
-        "counts": counts,
-        "mean_rate": round(mean_rate, 4),
-        "std_rate": round(std_rate, 4),
-        "slope": round(slope, 6),
-        "drift": round(drift, 4),
-    })
+    results.append(
+        {
+            "word": word,
+            "group": group,
+            "n_periods": len(periods),
+            "total_instances": sum(counts),
+            "periods": periods,
+            "rates": rates,
+            "counts": counts,
+            "mean_rate": round(mean_rate, 4),
+            "std_rate": round(std_rate, 4),
+            "slope": round(slope, 6),
+            "drift": round(drift, 4),
+        }
+    )
 
     # ── Per-word plot ──
     fig, ax1 = plt.subplots(figsize=(12, 5))
 
-    ax1.plot(range(len(periods)), rates, marker="o", color="crimson", linewidth=2, markersize=5)
+    ax1.plot(
+        range(len(periods)),
+        rates,
+        marker="o",
+        color="crimson",
+        linewidth=2,
+        markersize=5,
+    )
     ax1.set_ylabel("Taboo Hit Rate (fraction)", color="crimson")
     ax1.tick_params(axis="y", labelcolor="crimson")
     ax1.set_ylim(-0.05, 1.05)
     ax1.set_xlabel("Time Period")
     ax1.set_title(
-        f"Masked Prediction Shift: \"{word}\" [{group}]  "
+        f'Masked Prediction Shift: "{word}" [{group}]  '
         f"(slope={slope:.4f}, mean={mean_rate:.3f}, n={sum(counts)})"
     )
     ax1.set_xticks(range(len(periods)))
@@ -267,9 +289,11 @@ for r in results:
     counts = r["counts"]
 
     # Print table
-    print(f"\n── {word} [{group}] (slope={r['slope']:.4f}, mean={r['mean_rate']:.4f}) ──")
+    print(
+        f"\n── {word} [{group}] (slope={r['slope']:.4f}, mean={r['mean_rate']:.4f}) ──"
+    )
     print(f"  {'Period':<12} {'Hits':>8} {'Total':>8} {'Rate':>8}")
-    print(f"  {'─'*40}")
+    print(f"  {'─' * 40}")
 
     word_data = all_data.get(word, {})
     for m_idx, period in enumerate(periods):
@@ -279,14 +303,16 @@ for r in results:
         rate = rates[m_idx]
         print(f"  {period:<12} {hits:>8} {total:>8} {rate:>8.4f}")
 
-        all_rows_csv.append({
-            "word": word,
-            "group": group,
-            "period": period,
-            "hits": hits,
-            "total": total,
-            "rate": round(rate, 4),
-        })
+        all_rows_csv.append(
+            {
+                "word": word,
+                "group": group,
+                "period": period,
+                "hits": hits,
+                "total": total,
+                "rate": round(rate, 4),
+            }
+        )
 
     # Save per-word CSV
     safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", word)
@@ -301,8 +327,10 @@ for r in results:
 combined_csv_path = os.path.join(OUTPUT_DIR, f"all_words_per_period_{time_label}.csv")
 with open(combined_csv_path, "w") as f:
     f.write("word,group,period,hits,total,rate\n")
-    for row in all_rows_csv:
-        f.write(f"{row['word']},{row['group']},{row['period']},{row['hits']},{row['total']},{row['rate']}\n")
+    f.writelines(
+        f"{row['word']},{row['group']},{row['period']},{row['hits']},{row['total']},{row['rate']}\n"
+        for row in all_rows_csv
+    )
 
 print(f"\nPer-word CSVs saved to {data_dir}/")
 print(f"Combined CSV saved to {combined_csv_path}")
@@ -344,10 +372,22 @@ def make_group_plot():
         valid_mean = mean_line[valid]
         valid_std = std_line[valid]
 
-        ax.plot(valid_indices, valid_mean, marker="o", color=color,
-                linewidth=2, markersize=4, label=f"{group_label} (n={len(group_results)})")
-        ax.fill_between(valid_indices, valid_mean - valid_std, valid_mean + valid_std,
-                        color=color, alpha=0.1)
+        ax.plot(
+            valid_indices,
+            valid_mean,
+            marker="o",
+            color=color,
+            linewidth=2,
+            markersize=4,
+            label=f"{group_label} (n={len(group_results)})",
+        )
+        ax.fill_between(
+            valid_indices,
+            valid_mean - valid_std,
+            valid_mean + valid_std,
+            color=color,
+            alpha=0.1,
+        )
 
     ax.set_ylabel("Taboo Hit Rate (fraction of contexts with drug prediction)")
     ax.set_xlabel("Time Period")
@@ -373,16 +413,18 @@ results_sorted = sorted(results, key=lambda r: r["slope"], reverse=True)
 
 summary = []
 for r in results_sorted:
-    summary.append({
-        "word": r["word"],
-        "group": r["group"],
-        "n_periods": r["n_periods"],
-        "total_instances": r["total_instances"],
-        "mean_rate": r["mean_rate"],
-        "std_rate": r["std_rate"],
-        "slope": r["slope"],
-        "drift": r["drift"],
-    })
+    summary.append(
+        {
+            "word": r["word"],
+            "group": r["group"],
+            "n_periods": r["n_periods"],
+            "total_instances": r["total_instances"],
+            "mean_rate": r["mean_rate"],
+            "std_rate": r["std_rate"],
+            "slope": r["slope"],
+            "drift": r["drift"],
+        }
+    )
 
 summary_path = os.path.join(OUTPUT_DIR, f"masked_drift_summary_{time_label}.json")
 with open(summary_path, "w") as f:
@@ -395,7 +437,9 @@ for group_name in ["euphemism_candidate", "established_euphemism", "comparison"]
     if not group_rows:
         continue
     print(f"\n── {group_name.upper()} ──")
-    print(f"{'Word':<20} {'Mean Rate':>10} {'Slope':>10} {'Drift':>10} {'Instances':>10}")
+    print(
+        f"{'Word':<20} {'Mean Rate':>10} {'Slope':>10} {'Drift':>10} {'Instances':>10}"
+    )
     print("─" * 65)
     for r in group_rows:
         print(
@@ -412,9 +456,9 @@ for group_name in ["euphemism_candidate", "established_euphemism", "comparison"]
 # ──────────────────────────────────────────────────────────────
 cosine_summary_path = f"results/drift_summary_template_{time_label}.json"
 if os.path.exists(cosine_summary_path):
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("Cross-method comparison (masked prediction vs cosine similarity)")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     with open(cosine_summary_path, "r") as f:
         cosine_results = json.load(f)
@@ -432,12 +476,17 @@ if os.path.exists(cosine_summary_path):
 
         # Agreement on direction (both positive = both say drifting toward drug)
         same_direction = sum(
-            1 for w in shared
+            1
+            for w in shared
             if (masked_map[w]["slope"] > 0) == (cosine_map[w]["centroid_slope"] > 0)
         )
-        print(f"  Direction agreement: {same_direction}/{len(shared)} "
-              f"({100*same_direction/len(shared):.1f}%)")
+        print(
+            f"  Direction agreement: {same_direction}/{len(shared)} "
+            f"({100 * same_direction / len(shared):.1f}%)"
+        )
 else:
-    print(f"\n  (Cosine summary not found at {cosine_summary_path} — run cosine pipeline first for cross-method comparison)")
+    print(
+        f"\n  (Cosine summary not found at {cosine_summary_path} — run cosine pipeline first for cross-method comparison)"
+    )
 
 print("\nDone!")

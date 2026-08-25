@@ -18,11 +18,14 @@ Each part is a valid .zst file that collect_instances.py can process.
 
 import argparse
 import io
-import os
 import logging
+import os
+
 import zstandard as zstd
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 
@@ -35,8 +38,7 @@ def split_zst(
     os.makedirs(output_dir, exist_ok=True)
     basename = os.path.splitext(os.path.basename(input_path))[0]
     # Remove .zst extension if double-extension like .jsonl.zst
-    if basename.endswith(".jsonl"):
-        basename = basename[:-6]
+    basename = basename.removesuffix(".jsonl")
 
     dctx = zstd.ZstdDecompressor(max_window_size=2147483648)
     fh = open(input_path, "rb")
@@ -85,15 +87,18 @@ def split_zst(
     text_stream.close()
     fh.close()
 
-    logger.info(f"Done: {total_lines:,} lines split into {part_num} parts in {output_dir}")
+    logger.info(
+        f"Done: {total_lines:,} lines split into {part_num} parts in {output_dir}"
+    )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("input", help="Input .zst file")
     parser.add_argument("--output-dir", default="./split/")
-    parser.add_argument("--max-lines", type=int, default=2_000_000_000,
-                        help="Max lines per output file")
+    parser.add_argument(
+        "--max-lines", type=int, default=2_000_000_000, help="Max lines per output file"
+    )
     parser.add_argument("--compression-level", type=int, default=3)
     args = parser.parse_args()
 

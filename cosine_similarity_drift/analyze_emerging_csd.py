@@ -17,15 +17,16 @@ Usage: Run as SLURM array job, one task per JSONL file.
 Output: partial_results_{task_id}.json
 """
 
+import glob
 import json
-import numpy as np
+import os
+import re
 from collections import defaultdict
 from datetime import datetime
+
+import numpy as np
 import torch
-from transformers import AutoTokenizer, AutoModel
-import os
-import glob
-import re
+from transformers import AutoModel, AutoTokenizer
 
 # ──────────────────────────────────────────────────────────────
 # CONFIG
@@ -47,18 +48,48 @@ CHECKPOINT_FILE = f"checkpoint_{task_id}.json"
 # WORD GROUPS
 # ──────────────────────────────────────────────────────────────
 ANCHORS = [
-    "cathinones", "cocaine", "heroin", "marijuana", "fentanyl",
-    "methamphetamine", "meth", "amphetamine", "oxycodone", "xanax",
-    "adderall", "mdma", "ecstasy", "lsd", "pcp", "codeine", "ketamine",
+    "cathinones",
+    "cocaine",
+    "heroin",
+    "marijuana",
+    "fentanyl",
+    "methamphetamine",
+    "meth",
+    "amphetamine",
+    "oxycodone",
+    "xanax",
+    "adderall",
+    "mdma",
+    "ecstasy",
+    "lsd",
+    "pcp",
+    "codeine",
+    "ketamine",
     "bath salts",
 ]
 
 ESTABLISHED_EUPHEMISMS = ["molly", "coke", "crystal", "ping"]
 
 EUPHEMISM_CANDIDATES = [
-    "zing", "zaza", "flakka", "yart", "fein", "fenty", "pressed",
-    "penjamin", "ouid", "oui'd", "tranq", "gray death", "grey death",
-    "usb stick", "fetty", "tusi", "stamps", "tucibi", "happy water",
+    "zing",
+    "zaza",
+    "flakka",
+    "yart",
+    "fein",
+    "fenty",
+    "pressed",
+    "penjamin",
+    "ouid",
+    "oui'd",
+    "tranq",
+    "gray death",
+    "grey death",
+    "usb stick",
+    "fetty",
+    "tusi",
+    "stamps",
+    "tucibi",
+    "happy water",
 ]
 
 COMPARISON_WORDS = ["needle", "pharmacy", "prescription", "overdose"]
@@ -144,12 +175,19 @@ def load_checkpoint():
             data = json.load(f)
 
         # Rebuild candidate_slices
-        candidate_slices = defaultdict(lambda: defaultdict(lambda: {
-            "sum_embedding": np.zeros(HIDDEN_DIM), "count": 0,
-        }))
+        candidate_slices = defaultdict(
+            lambda: defaultdict(
+                lambda: {
+                    "sum_embedding": np.zeros(HIDDEN_DIM),
+                    "count": 0,
+                }
+            )
+        )
         for cand, slices in data["candidate_slices"].items():
             for month, entry in slices.items():
-                candidate_slices[cand][month]["sum_embedding"] = np.array(entry["sum_embedding"])
+                candidate_slices[cand][month]["sum_embedding"] = np.array(
+                    entry["sum_embedding"]
+                )
                 candidate_slices[cand][month]["count"] = entry["count"]
 
         # Rebuild corpus_anchor_sums
@@ -163,7 +201,9 @@ def load_checkpoint():
         rows_processed = data["rows_processed"]
         stats = data["stats"]
         print(f"  Resuming from row {rows_processed}")
-        print(f"  Stats so far: embedded={stats['embedded']}, skipped={stats['skipped_no_tokens']}")
+        print(
+            f"  Stats so far: embedded={stats['embedded']}, skipped={stats['skipped_no_tokens']}"
+        )
         return candidate_slices, corpus_anchor_sums, stats, rows_processed
 
     except Exception as e:
@@ -271,7 +311,9 @@ for anchor in ANCHORS:
     else:
         print(f"  [WARN] No vectors for '{anchor}', skipping.")
 
-print(f"Template embeddings for {len(anchor_template_embeddings)}/{len(ANCHORS)} anchors.\n")
+print(
+    f"Template embeddings for {len(anchor_template_embeddings)}/{len(ANCHORS)} anchors.\n"
+)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -294,16 +336,23 @@ checkpoint = load_checkpoint()
 if checkpoint:
     candidate_slices, corpus_anchor_sums, stats, rows_to_skip = checkpoint
 else:
-    candidate_slices = defaultdict(lambda: defaultdict(lambda: {
-        "sum_embedding": np.zeros(HIDDEN_DIM), "count": 0,
-    }))
+    candidate_slices = defaultdict(
+        lambda: defaultdict(
+            lambda: {
+                "sum_embedding": np.zeros(HIDDEN_DIM),
+                "count": 0,
+            }
+        )
+    )
     corpus_anchor_sums = {
-        anchor: {"sum": np.zeros(HIDDEN_DIM), "count": 0}
-        for anchor in ANCHORS
+        anchor: {"sum": np.zeros(HIDDEN_DIM), "count": 0} for anchor in ANCHORS
     }
     stats = {
-        "rows_read": 0, "span_found": 0, "embedded": 0,
-        "skipped_no_span": 0, "skipped_no_tokens": 0,
+        "rows_read": 0,
+        "span_found": 0,
+        "embedded": 0,
+        "skipped_no_span": 0,
+        "skipped_no_tokens": 0,
     }
     rows_to_skip = 0
 
@@ -371,12 +420,14 @@ with open(target_file, "r") as f:
 
         stats["span_found"] += 1
 
-        batch_queue.append({
-            "sentence": sentence,
-            "span": (start, end),
-            "candidate": candidate,
-            "timestamp": timestamp,
-        })
+        batch_queue.append(
+            {
+                "sentence": sentence,
+                "span": (start, end),
+                "candidate": candidate,
+                "timestamp": timestamp,
+            }
+        )
 
         if len(batch_queue) >= BATCH_SIZE:
             flush_batch(batch_queue)
@@ -385,7 +436,9 @@ with open(target_file, "r") as f:
 
             # Incremental save
             if batches_since_save >= SAVE_EVERY:
-                save_checkpoint(candidate_slices, corpus_anchor_sums, stats, current_row)
+                save_checkpoint(
+                    candidate_slices, corpus_anchor_sums, stats, current_row
+                )
                 batches_since_save = 0
                 print(
                     f"  [CHECKPOINT] Row {current_row} | "
@@ -397,7 +450,7 @@ with open(target_file, "r") as f:
 flush_batch(batch_queue)
 batch_queue = []
 
-print(f"\nProcessing complete.")
+print("\nProcessing complete.")
 print(f"  Rows read:             {stats['rows_read']}")
 print(f"  Spans found:           {stats['span_found']}")
 print(f"  Successfully embedded: {stats['embedded']}")

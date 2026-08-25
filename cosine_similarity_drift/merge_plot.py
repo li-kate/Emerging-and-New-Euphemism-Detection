@@ -24,18 +24,21 @@ TIME GRANULARITY:
   for smoother trends and less noise. Default is monthly.
 """
 
-import json
 import glob
-import numpy as np
+import json
+
 import matplotlib
+import numpy as np
+
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from collections import defaultdict
-from sklearn.metrics.pairwise import cosine_similarity
-from scipy import stats as scipy_stats
+import argparse
 import os
 import re
-import argparse
+from collections import defaultdict
+
+import matplotlib.pyplot as plt
+from scipy import stats as scipy_stats
+from sklearn.metrics.pairwise import cosine_similarity
 
 # ──────────────────────────────────────────────────────────────
 # CONFIG
@@ -55,8 +58,9 @@ WORD_ALIASES = {
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
-    "--half-year", action="store_true",
-    help="Aggregate into 6-month bins (YYYY-H1/H2) instead of monthly"
+    "--half-year",
+    action="store_true",
+    help="Aggregate into 6-month bins (YYYY-H1/H2) instead of monthly",
 )
 args = parser.parse_args()
 USE_HALF_YEAR = args.half_year
@@ -104,15 +108,25 @@ if not partial_files:
     exit()
 
 # Accumulate: word -> month -> {sum, count}
-all_data = defaultdict(lambda: defaultdict(lambda: {
-    "sum": np.zeros(HIDDEN_DIM), "count": 0,
-}))
+all_data = defaultdict(
+    lambda: defaultdict(
+        lambda: {
+            "sum": np.zeros(HIDDEN_DIM),
+            "count": 0,
+        }
+    )
+)
 
 # Collect anchor embeddings
 all_template_embeddings = defaultdict(list)  # anchor -> list of vectors
 corpus_anchor_sums = defaultdict(lambda: {"sum": np.zeros(HIDDEN_DIM), "count": 0})
 word_groups = {}
-total_stats = {"rows_read": 0, "embedded": 0, "skipped_no_span": 0, "skipped_no_tokens": 0}
+total_stats = {
+    "rows_read": 0,
+    "embedded": 0,
+    "skipped_no_span": 0,
+    "skipped_no_tokens": 0,
+}
 
 for f_path in partial_files:
     print(f"  Reading {f_path}...", end=" ", flush=True)
@@ -157,14 +171,16 @@ if USE_HALF_YEAR:
     print("\nAggregating to half-year periods...")
     aggregated_data = {}
     for word, month_data in all_data.items():
-        aggregated_data[word] = defaultdict(lambda: {"sum": np.zeros(HIDDEN_DIM), "count": 0})
+        aggregated_data[word] = defaultdict(
+            lambda: {"sum": np.zeros(HIDDEN_DIM), "count": 0}
+        )
         for month, data in month_data.items():
             period = month_to_half_year(month)
             aggregated_data[word][period]["sum"] += data["sum"]
             aggregated_data[word][period]["count"] += data["count"]
     all_data = aggregated_data
 
-print(f"\nMerge complete.")
+print("\nMerge complete.")
 print(f"  Total unique words: {len(all_data)}")
 print(f"  Total embedded:     {total_stats['embedded']}")
 
@@ -184,8 +200,10 @@ corpus_anchors = {}
 for anchor, data in corpus_anchor_sums.items():
     if data["count"] > 0:
         corpus_anchors[anchor] = data["sum"] / data["count"]
-print(f"Option B: {len(corpus_anchors)} corpus anchor embeddings "
-      f"(from {sum(d['count'] for d in corpus_anchor_sums.values())} instances).")
+print(
+    f"Option B: {len(corpus_anchors)} corpus anchor embeddings "
+    f"(from {sum(d['count'] for d in corpus_anchor_sums.values())} instances)."
+)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -198,18 +216,22 @@ def run_analysis(anchor_embeddings, label):
       2. Monthly similarity to each anchor (secondary — which drug?)
     Returns a list of result dicts.
     """
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Analysis: {label}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     time_label = "half_year" if USE_HALF_YEAR else "monthly"
     plot_dir_main = os.path.join(OUTPUT_DIR, f"plots_{label}_centroid_{time_label}")
-    plot_dir_anchors = os.path.join(OUTPUT_DIR, f"plots_{label}_per_anchor_{time_label}")
+    plot_dir_anchors = os.path.join(
+        OUTPUT_DIR, f"plots_{label}_per_anchor_{time_label}"
+    )
     os.makedirs(plot_dir_main, exist_ok=True)
     os.makedirs(plot_dir_anchors, exist_ok=True)
 
     anchor_names = sorted(anchor_embeddings.keys())
-    anchor_matrix = np.array([anchor_embeddings[a] for a in anchor_names])  # (n_anchors, 768)
+    anchor_matrix = np.array(
+        [anchor_embeddings[a] for a in anchor_names]
+    )  # (n_anchors, 768)
 
     # THE CENTROID: single vector = mean of all anchor embeddings
     centroid = anchor_matrix.mean(axis=0).reshape(1, -1)  # (1, 768)
@@ -226,7 +248,8 @@ def run_analysis(anchor_embeddings, label):
 
         # Filter periods
         valid_periods = {
-            m: d for m, d in slices.items()
+            m: d
+            for m, d in slices.items()
             if d["count"] >= MIN_INSTANCES_PER_PERIOD and m != "unknown"
         }
         time_keys = sorted(valid_periods.keys())
@@ -235,8 +258,8 @@ def run_analysis(anchor_embeddings, label):
 
         # ── Compute similarities ──
         periods = []
-        centroid_sims = []       # PRIMARY: similarity to drug centroid
-        all_anchor_sims = []     # SECONDARY: similarity to each anchor
+        centroid_sims = []  # PRIMARY: similarity to drug centroid
+        all_anchor_sims = []  # SECONDARY: similarity to each anchor
         counts = []
 
         for period in time_keys:
@@ -259,7 +282,9 @@ def run_analysis(anchor_embeddings, label):
 
         # ── Primary stats: centroid drift ──
         x = np.arange(len(centroid_sims), dtype=float)
-        centroid_slope = float(np.polyfit(x, centroid_sims, 1)[0]) if len(x) > 1 else 0.0
+        centroid_slope = (
+            float(np.polyfit(x, centroid_sims, 1)[0]) if len(x) > 1 else 0.0
+        )
         centroid_drift = float(centroid_sims[-1] - centroid_sims[0])
         centroid_mean = float(np.mean(centroid_sims))
         centroid_std = float(np.std(centroid_sims))
@@ -292,42 +317,52 @@ def run_analysis(anchor_embeddings, label):
         steepest_anchor = anchor_names[steepest_idx]
         steepest_slope = slopes_per_anchor[steepest_idx]
 
-        results.append({
-            "word": word,
-            "group": group,
-            "n_periods": len(periods),
-            "total_instances": sum(counts),
-            "periods": periods,
-            "counts": counts,
-            "centroid_sims": centroid_sims.tolist(),
-            "centroid_slope": round(centroid_slope, 6),
-            "centroid_drift": round(centroid_drift, 4),
-            "centroid_mean_sim": round(centroid_mean, 4),
-            "centroid_std_sim": round(centroid_std, 4),
-            "centroid_r": round(centroid_r, 4),
-            "centroid_p": round(centroid_p, 4),
-            "centroid_significant": centroid_p < 0.05,
-            "best_anchor": best_anchor,
-            "best_anchor_mean_sim": round(float(mean_sims_per_anchor[best_anchor_idx]), 4),
-            "best_anchor_slope": round(best_slope, 6),
-            "steepest_anchor": steepest_anchor,
-            "steepest_anchor_slope": round(steepest_slope, 6),
-            "per_anchor_mean_sim": {
-                anchor_names[i]: round(float(mean_sims_per_anchor[i]), 4)
-                for i in range(len(anchor_names))
-            },
-        })
+        results.append(
+            {
+                "word": word,
+                "group": group,
+                "n_periods": len(periods),
+                "total_instances": sum(counts),
+                "periods": periods,
+                "counts": counts,
+                "centroid_sims": centroid_sims.tolist(),
+                "centroid_slope": round(centroid_slope, 6),
+                "centroid_drift": round(centroid_drift, 4),
+                "centroid_mean_sim": round(centroid_mean, 4),
+                "centroid_std_sim": round(centroid_std, 4),
+                "centroid_r": round(centroid_r, 4),
+                "centroid_p": round(centroid_p, 4),
+                "centroid_significant": centroid_p < 0.05,
+                "best_anchor": best_anchor,
+                "best_anchor_mean_sim": round(
+                    float(mean_sims_per_anchor[best_anchor_idx]), 4
+                ),
+                "best_anchor_slope": round(best_slope, 6),
+                "steepest_anchor": steepest_anchor,
+                "steepest_anchor_slope": round(steepest_slope, 6),
+                "per_anchor_mean_sim": {
+                    anchor_names[i]: round(float(mean_sims_per_anchor[i]), 4)
+                    for i in range(len(anchor_names))
+                },
+            }
+        )
 
         # ── PRIMARY PLOT: word vs drug centroid over time ──
         fig, ax1 = plt.subplots(figsize=(12, 5))
-        ax1.plot(range(len(periods)), centroid_sims, marker="o", color="royalblue",
-                 linewidth=2, markersize=5)
+        ax1.plot(
+            range(len(periods)),
+            centroid_sims,
+            marker="o",
+            color="royalblue",
+            linewidth=2,
+            markersize=5,
+        )
         ax1.set_ylabel("Cosine Similarity to Drug Centroid", color="royalblue")
         ax1.tick_params(axis="y", labelcolor="royalblue")
         ax1.set_ylim(0.0, 1.0)
         ax1.set_xlabel("Time Period")
         ax1.set_title(
-            f"\"{word}\" [{group}] — Drug Centroid Drift [{label}]  "
+            f'"{word}" [{group}] — Drug Centroid Drift [{label}]  '
             f"(slope={centroid_slope:.4f}, r={centroid_r:.3f}, p={centroid_p:.3f}, n={sum(counts)})"
         )
         ax1.set_xticks(range(len(periods)))
@@ -355,15 +390,19 @@ def run_analysis(anchor_embeddings, label):
             a_sims = sim_matrix[:, a_idx]
             a_slope = slopes_per_anchor[a_idx]
             ax1.plot(
-                range(len(periods)), a_sims, marker="o", color=colors[rank],
-                linewidth=2, markersize=4,
+                range(len(periods)),
+                a_sims,
+                marker="o",
+                color=colors[rank],
+                linewidth=2,
+                markersize=4,
                 label=f"{a_name} (slope={a_slope:.4f})",
             )
 
         ax1.set_ylabel("Cosine Similarity to Individual Anchor")
         ax1.set_ylim(0.0, 1.0)
         ax1.set_xlabel("Time Period")
-        ax1.set_title(f"\"{word}\" [{group}] — Top 3 Anchors [{label}]")
+        ax1.set_title(f'"{word}" [{group}] — Top 3 Anchors [{label}]')
         ax1.legend(loc="upper left", fontsize=8)
         ax1.set_xticks(range(len(periods)))
         ax1.set_xticklabels(periods, rotation=45, ha="right")
@@ -407,9 +446,7 @@ def make_group_plot(results, label):
     time_label = "half_year" if USE_HALF_YEAR else "monthly"
     plot_path = os.path.join(OUTPUT_DIR, f"group_comparison_{label}_{time_label}.png")
 
-    all_periods = sorted(set(
-        m for r in results for m in r["periods"]
-    ))
+    all_periods = sorted(set(m for r in results for m in r["periods"]))
     period_to_idx = {m: i for i, m in enumerate(all_periods)}
 
     group_colors = {
@@ -441,10 +478,22 @@ def make_group_plot(results, label):
         valid_mean = mean_line[valid]
         valid_std = std_line[valid]
 
-        ax.plot(valid_indices, valid_mean, marker="o", color=color,
-                linewidth=2, markersize=4, label=f"{group_label} (n={len(group_results)})")
-        ax.fill_between(valid_indices, valid_mean - valid_std, valid_mean + valid_std,
-                        color=color, alpha=0.1)
+        ax.plot(
+            valid_indices,
+            valid_mean,
+            marker="o",
+            color=color,
+            linewidth=2,
+            markersize=4,
+            label=f"{group_label} (n={len(group_results)})",
+        )
+        ax.fill_between(
+            valid_indices,
+            valid_mean - valid_std,
+            valid_mean + valid_std,
+            color=color,
+            alpha=0.1,
+        )
 
     ax.set_ylabel("Cosine Similarity to Drug Centroid")
     ax.set_ylim(0.0, 1.0)
@@ -476,26 +525,28 @@ def save_summary(results, label):
     # Clean up for JSON
     summary = []
     for r in results_sorted:
-        summary.append({
-            "word": r["word"],
-            "group": r["group"],
-            "n_periods": r["n_periods"],
-            "total_instances": r["total_instances"],
-            # PRIMARY: centroid
-            "centroid_mean_sim": r["centroid_mean_sim"],
-            "centroid_slope": r["centroid_slope"],
-            "centroid_drift": r["centroid_drift"],
-            "centroid_r": r["centroid_r"],
-            "centroid_p": r["centroid_p"],
-            "centroid_significant": r["centroid_significant"],
-            # SECONDARY: per-anchor
-            "best_anchor": r["best_anchor"],
-            "best_anchor_mean_sim": r["best_anchor_mean_sim"],
-            "best_anchor_slope": r["best_anchor_slope"],
-            "steepest_anchor": r["steepest_anchor"],
-            "steepest_anchor_slope": r["steepest_anchor_slope"],
-            "per_anchor_mean_sim": r["per_anchor_mean_sim"],
-        })
+        summary.append(
+            {
+                "word": r["word"],
+                "group": r["group"],
+                "n_periods": r["n_periods"],
+                "total_instances": r["total_instances"],
+                # PRIMARY: centroid
+                "centroid_mean_sim": r["centroid_mean_sim"],
+                "centroid_slope": r["centroid_slope"],
+                "centroid_drift": r["centroid_drift"],
+                "centroid_r": r["centroid_r"],
+                "centroid_p": r["centroid_p"],
+                "centroid_significant": r["centroid_significant"],
+                # SECONDARY: per-anchor
+                "best_anchor": r["best_anchor"],
+                "best_anchor_mean_sim": r["best_anchor_mean_sim"],
+                "best_anchor_slope": r["best_anchor_slope"],
+                "steepest_anchor": r["steepest_anchor"],
+                "steepest_anchor_slope": r["steepest_anchor_slope"],
+                "per_anchor_mean_sim": r["per_anchor_mean_sim"],
+            }
+        )
 
     out_path = os.path.join(OUTPUT_DIR, f"drift_summary_{label}_{time_label}.json")
     with open(out_path, "w") as f:
@@ -508,9 +559,13 @@ def save_summary(results, label):
         if not group_rows:
             continue
         sig_count = sum(1 for r in group_rows if r["centroid_significant"])
-        print(f"\n── {group_name.upper()} [{label}] ({sig_count}/{len(group_rows)} significant) ──")
-        print(f"{'Word':<18} {'Mean Sim':>9} {'Slope':>9} {'r':>7} {'p':>7} {'Sig':>4} │ "
-              f"{'Best Anchor':<15} {'Instances':>10}")
+        print(
+            f"\n── {group_name.upper()} [{label}] ({sig_count}/{len(group_rows)} significant) ──"
+        )
+        print(
+            f"{'Word':<18} {'Mean Sim':>9} {'Slope':>9} {'r':>7} {'p':>7} {'Sig':>4} │ "
+            f"{'Best Anchor':<15} {'Instances':>10}"
+        )
         print("─" * 100)
         for r in group_rows:
             sig_marker = " *" if r["centroid_significant"] else "  "
@@ -523,29 +578,49 @@ def save_summary(results, label):
 
     # ── GROUP-LEVEL STATISTICAL TEST ──
     # Are euphemism candidate slopes significantly different from comparison word slopes?
-    candidate_slopes = [r["centroid_slope"] for r in results_sorted if r["group"] == "euphemism_candidate"]
-    comparison_slopes = [r["centroid_slope"] for r in results_sorted if r["group"] == "comparison"]
+    candidate_slopes = [
+        r["centroid_slope"]
+        for r in results_sorted
+        if r["group"] == "euphemism_candidate"
+    ]
+    comparison_slopes = [
+        r["centroid_slope"] for r in results_sorted if r["group"] == "comparison"
+    ]
 
     if len(candidate_slopes) >= 2 and len(comparison_slopes) >= 2:
         print(f"\n── GROUP-LEVEL TEST [{label}] ──")
-        print(f"  Candidate slopes:   mean={np.mean(candidate_slopes):.6f}, n={len(candidate_slopes)}")
-        print(f"  Comparison slopes:  mean={np.mean(comparison_slopes):.6f}, n={len(comparison_slopes)}")
+        print(
+            f"  Candidate slopes:   mean={np.mean(candidate_slopes):.6f}, n={len(candidate_slopes)}"
+        )
+        print(
+            f"  Comparison slopes:  mean={np.mean(comparison_slopes):.6f}, n={len(comparison_slopes)}"
+        )
 
         # Mann-Whitney U: non-parametric, doesn't assume normality
         # Tests whether candidate slopes tend to be larger than comparison slopes
         u_stat, u_p = scipy_stats.mannwhitneyu(
             candidate_slopes, comparison_slopes, alternative="greater"
         )
-        print(f"  Mann-Whitney U (candidates > comparisons): U={u_stat:.1f}, p={u_p:.4f}")
+        print(
+            f"  Mann-Whitney U (candidates > comparisons): U={u_stat:.1f}, p={u_p:.4f}"
+        )
         if u_p < 0.05:
-            print(f"  → SIGNIFICANT: euphemism candidates drift more than comparison words (p={u_p:.4f})")
+            print(
+                f"  → SIGNIFICANT: euphemism candidates drift more than comparison words (p={u_p:.4f})"
+            )
         else:
             print(f"  → Not significant at α=0.05 (p={u_p:.4f})")
 
         # Also report established euphemisms vs comparison
-        established_slopes = [r["centroid_slope"] for r in results_sorted if r["group"] == "established_euphemism"]
+        established_slopes = [
+            r["centroid_slope"]
+            for r in results_sorted
+            if r["group"] == "established_euphemism"
+        ]
         if len(established_slopes) >= 2:
-            print(f"  Established slopes: mean={np.mean(established_slopes):.6f}, n={len(established_slopes)}")
+            print(
+                f"  Established slopes: mean={np.mean(established_slopes):.6f}, n={len(established_slopes)}"
+            )
 
 
 save_summary(results_a, "template")
@@ -557,9 +632,9 @@ if results_b:
 # 7. CROSS-CENTROID AGREEMENT
 # ──────────────────────────────────────────────────────────────
 if results_b:
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("Cross-centroid agreement check")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     map_a = {r["word"]: r for r in results_a}
     map_b = {r["word"]: r for r in results_b}
@@ -575,10 +650,11 @@ if results_b:
 
         # SECONDARY: Do they agree on which specific anchor?
         anchor_agreement = sum(
-            1 for w in shared
-            if map_a[w]["best_anchor"] == map_b[w]["best_anchor"]
+            1 for w in shared if map_a[w]["best_anchor"] == map_b[w]["best_anchor"]
         )
-        print(f"  Best-anchor agreement: {anchor_agreement}/{len(shared)} "
-              f"({100*anchor_agreement/len(shared):.1f}%)")
+        print(
+            f"  Best-anchor agreement: {anchor_agreement}/{len(shared)} "
+            f"({100 * anchor_agreement / len(shared):.1f}%)"
+        )
 
 print("\nDone!")

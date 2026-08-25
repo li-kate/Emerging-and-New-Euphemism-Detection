@@ -29,13 +29,13 @@ Usage:
 Output: masked_results_{task_id}.json (partial), then merge with merge_masked.py
 """
 
-import json
-import re
-import os
 import glob
-import numpy as np
+import json
+import os
+import re
 from collections import defaultdict
 from datetime import datetime
+
 import torch
 from transformers import AutoModelForMaskedLM, AutoTokenizer
 
@@ -47,8 +47,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 DATA_DIR = "../matches"
 MODEL_NAME = "bert-base-uncased"
-TOP_K = 15              # Number of predictions to check per masked position
-SAVE_EVERY = 5000       # Checkpoint every N rows
+TOP_K = 15  # Number of predictions to check per masked position
+SAVE_EVERY = 5000  # Checkpoint every N rows
 
 OUTPUT_FILE = f"masked_results_{task_id}.json"
 CHECKPOINT_FILE = f"masked_checkpoint_{task_id}.json"
@@ -57,18 +57,48 @@ CHECKPOINT_FILE = f"masked_checkpoint_{task_id}.json"
 # WORD GROUPS (identical to cosine pipeline)
 # ──────────────────────────────────────────────────────────────
 ANCHORS = [
-    "cathinones", "cocaine", "heroin", "marijuana", "fentanyl",
-    "methamphetamine", "meth", "amphetamine", "oxycodone", "xanax",
-    "adderall", "mdma", "ecstasy", "lsd", "pcp", "codeine", "ketamine",
+    "cathinones",
+    "cocaine",
+    "heroin",
+    "marijuana",
+    "fentanyl",
+    "methamphetamine",
+    "meth",
+    "amphetamine",
+    "oxycodone",
+    "xanax",
+    "adderall",
+    "mdma",
+    "ecstasy",
+    "lsd",
+    "pcp",
+    "codeine",
+    "ketamine",
     "bath salts",
 ]
 
 ESTABLISHED_EUPHEMISMS = ["molly", "coke", "crystal", "ping"]
 
 EUPHEMISM_CANDIDATES = [
-    "zing", "zaza", "flakka", "yart", "fein", "fenty", "pressed",
-    "penjamin", "ouid", "oui'd", "tranq", "gray death", "grey death",
-    "usb stick", "fetty", "tusi", "stamps", "tucibi", "happy water",
+    "zing",
+    "zaza",
+    "flakka",
+    "yart",
+    "fein",
+    "fenty",
+    "pressed",
+    "penjamin",
+    "ouid",
+    "oui'd",
+    "tranq",
+    "gray death",
+    "grey death",
+    "usb stick",
+    "fetty",
+    "tusi",
+    "stamps",
+    "tucibi",
+    "happy water",
 ]
 
 COMPARISON_WORDS = ["needle", "pharmacy", "prescription", "overdose"]
@@ -105,27 +135,98 @@ for word in ANCHORS:
 
 # Add common drug-related terms that BERT might predict
 EXTRA_TABOO = [
-    "drug", "drugs", "narcotic", "narcotics", "substance",
-    "cannabis", "weed", "pot", "hash", "hashish",
-    "opiate", "opiates", "opioid", "opioids",
-    "stimulant", "depressant", "hallucinogen",
-    "overdose", "addiction", "addictive", "addicted",
-    "snort", "inject", "smoke", "inhale",
-    "dealer", "trafficking", "cartel", "dea",
-    "stash", "dose", "dosage", "high", "stoned",
-    "crack", "crystal", "ice", "speed",
-    "pill", "pills", "tablet", "capsule",
-    "powder", "rock", "rocks",
-    "syringe", "needle","percocet", "suboxone", "klonopin", "ritalin", "concerta",
-    "vicodin", "norco", "dilaudid", "rohypnol", "oxycontin",
-    "roxicodone", "ketalar", "daytrana", "morphine", "opium",
-    "ghb", "peyote", "mescaline", "psilocybin", "mushrooms",
-    "steroids", "khat", "hash", "hydrocodone", "hydromorphone",
-    "promethazine", "buprenorphine", "naloxone", "clonazepam",
-    "alprazolam", "flunitrazepam", "methylphenidate",
-    "addict", "addicts", "junkie", "junkies", "fiend", "fiends",
-    "abuser", "abusers", "crackhead", "tweaker", "stoner",
-    "sedative", "tranquilizer"
+    "drug",
+    "drugs",
+    "narcotic",
+    "narcotics",
+    "substance",
+    "cannabis",
+    "weed",
+    "pot",
+    "hash",
+    "hashish",
+    "opiate",
+    "opiates",
+    "opioid",
+    "opioids",
+    "stimulant",
+    "depressant",
+    "hallucinogen",
+    "overdose",
+    "addiction",
+    "addictive",
+    "addicted",
+    "snort",
+    "inject",
+    "smoke",
+    "inhale",
+    "dealer",
+    "trafficking",
+    "cartel",
+    "dea",
+    "stash",
+    "dose",
+    "dosage",
+    "high",
+    "stoned",
+    "crack",
+    "crystal",
+    "ice",
+    "speed",
+    "pill",
+    "pills",
+    "tablet",
+    "capsule",
+    "powder",
+    "rock",
+    "rocks",
+    "syringe",
+    "needle",
+    "percocet",
+    "suboxone",
+    "klonopin",
+    "ritalin",
+    "concerta",
+    "vicodin",
+    "norco",
+    "dilaudid",
+    "rohypnol",
+    "oxycontin",
+    "roxicodone",
+    "ketalar",
+    "daytrana",
+    "morphine",
+    "opium",
+    "ghb",
+    "peyote",
+    "mescaline",
+    "psilocybin",
+    "mushrooms",
+    "steroids",
+    "khat",
+    "hash",
+    "hydrocodone",
+    "hydromorphone",
+    "promethazine",
+    "buprenorphine",
+    "naloxone",
+    "clonazepam",
+    "alprazolam",
+    "flunitrazepam",
+    "methylphenidate",
+    "addict",
+    "addicts",
+    "junkie",
+    "junkies",
+    "fiend",
+    "fiends",
+    "abuser",
+    "abusers",
+    "crackhead",
+    "tweaker",
+    "stoner",
+    "sedative",
+    "tranquilizer",
 ]
 
 for w in EXTRA_TABOO:
@@ -196,7 +297,9 @@ def load_checkpoint():
         rows_processed = data["rows_processed"]
         stats = data["stats"]
         print(f"  Resuming from row {rows_processed}")
-        print(f"  Stats so far: processed={stats['processed']}, hits={stats['total_hits']}")
+        print(
+            f"  Stats so far: processed={stats['processed']}, hits={stats['total_hits']}"
+        )
         return accumulator, stats, rows_processed
 
     except Exception as e:
@@ -358,15 +461,15 @@ with open(target_file, "r") as f:
                 f"  [CHECKPOINT] Row {current_row} | "
                 f"Processed: {stats['processed']} | "
                 f"Hits: {stats['total_hits']} | "
-                f"Hit rate: {stats['total_hits']/max(1,stats['processed']):.3f}"
+                f"Hit rate: {stats['total_hits'] / max(1, stats['processed']):.3f}"
             )
 
-print(f"\nProcessing complete.")
+print("\nProcessing complete.")
 print(f"  Rows read:        {stats['rows_read']}")
 print(f"  Processed:        {stats['processed']}")
 print(f"  Skipped (no span): {stats['skipped_no_span']}")
 print(f"  Total hits:       {stats['total_hits']}")
-print(f"  Overall hit rate: {stats['total_hits']/max(1,stats['processed']):.4f}")
+print(f"  Overall hit rate: {stats['total_hits'] / max(1, stats['processed']):.4f}")
 
 
 # ──────────────────────────────────────────────────────────────

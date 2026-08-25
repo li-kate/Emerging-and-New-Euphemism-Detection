@@ -49,16 +49,15 @@ Required: pip install pyahocorasick zstandard
 """
 
 import argparse
+import glob
+import io
 import json
 import logging
 import os
 import re
-import glob
-import io
-from dataclasses import dataclass, asdict
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
-from typing import Iterator, Optional
 
 logging.basicConfig(
     level=logging.INFO,
@@ -70,6 +69,7 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 # WORD LIST LOADING
 # ============================================================================
+
 
 def load_word_list(path: str) -> dict[str, str]:
     """
@@ -135,11 +135,11 @@ def load_word_list(path: str) -> dict[str, str]:
 def load_multiple_word_lists(paths: list[str]) -> dict[str, str]:
     """
     Load and merge multiple word list files.
-    
+
     If a word has no category (plain text file), it gets tagged
-    with the filename as its category. This way you can tell 
+    with the filename as its category. This way you can tell
     euphemisms from comparison words in the output.
-    
+
     Example:
         euphemisms.txt contains "snow" → category = "euphemisms"
         comparison_words.txt contains "needle" → category = "comparison_words"
@@ -161,6 +161,7 @@ def load_multiple_word_lists(paths: list[str]) -> dict[str, str]:
 # ============================================================================
 # AHO-CORASICK MATCHER
 # ============================================================================
+
 
 class Matcher:
     """
@@ -184,16 +185,14 @@ class Matcher:
     def _build(self):
         try:
             import ahocorasick
+
             A = ahocorasick.Automaton()
             for word, category in self.words.items():
                 A.add_word(word.lower(), (word, category))
             A.make_automaton()
             self._automaton = A
             self._backend = "pyahocorasick"
-            logger.info(
-                f"Matcher built ({self._backend}): "
-                f"{len(self.words)} patterns"
-            )
+            logger.info(f"Matcher built ({self._backend}): {len(self.words)} patterns")
         except ImportError:
             logger.warning(
                 "pyahocorasick not installed — using naive matching. "
@@ -216,12 +215,14 @@ class Matcher:
                 start = end_idx - len(word) + 1
                 end = end_idx + 1
                 if self._is_word_boundary(text_lower, start, end):
-                    matches.append({
-                        "word": word,
-                        "category": category,
-                        "start": start,
-                        "end": end,
-                    })
+                    matches.append(
+                        {
+                            "word": word,
+                            "category": category,
+                            "start": start,
+                            "end": end,
+                        }
+                    )
         else:
             for word, category in self.words.items():
                 idx = 0
@@ -232,12 +233,14 @@ class Matcher:
                         break
                     end = pos + len(word_lower)
                     if self._is_word_boundary(text_lower, pos, end):
-                        matches.append({
-                            "word": word,
-                            "category": category,
-                            "start": pos,
-                            "end": end,
-                        })
+                        matches.append(
+                            {
+                                "word": word,
+                                "category": category,
+                                "start": pos,
+                                "end": end,
+                            }
+                        )
                     idx = pos + 1
 
         return matches
@@ -255,11 +258,12 @@ class Matcher:
 # REDDIT STREAMING
 # ============================================================================
 
+
 def stream_reddit_file(
     path: str,
     start_year: int = 2015,
     end_year: int = 2026,
-    subreddits: Optional[set[str]] = None,
+    subreddits: set[str] | None = None,
 ) -> Iterator[dict]:
     """
     Stream Reddit comments from a .zst dump file.
@@ -318,7 +322,9 @@ def stream_reddit_file(
                 # Frame boundary — create new decompressor and continue
                 try:
                     decompressor = dctx.decompressobj()
-                    text = decompressor.decompress(chunk).decode("utf-8", errors="ignore")
+                    text = decompressor.decompress(chunk).decode(
+                        "utf-8", errors="ignore"
+                    )
                 except zstd.ZstdError:
                     logger.warning(f"  Skipping unreadable chunk at byte {fh.tell()}")
                     continue
@@ -341,7 +347,9 @@ def stream_reddit_file(
 
         # Process any remaining leftover
         if leftover.strip():
-            result = _process_reddit_line(leftover.strip(), start_year, end_year, subreddits)
+            result = _process_reddit_line(
+                leftover.strip(), start_year, end_year, subreddits
+            )
             if result is not None:
                 yielded += 1
 
@@ -358,8 +366,8 @@ def _process_reddit_line(
     line: str,
     start_year: int,
     end_year: int,
-    subreddits: Optional[set[str]],
-) -> Optional[dict]:
+    subreddits: set[str] | None,
+) -> dict | None:
     """Process a single JSON line from a Reddit dump. Returns dict or None."""
     try:
         obj = json.loads(line)
@@ -408,10 +416,11 @@ def _process_reddit_line(
 # CSV STREAMING
 # ============================================================================
 
+
 def stream_csv_file(
     path: str,
-    text_column: Optional[str] = None,
-    timestamp_column: Optional[str] = None,
+    text_column: str | None = None,
+    timestamp_column: str | None = None,
 ) -> Iterator[dict]:
     """
     Stream text records from a CSV file.
@@ -421,12 +430,23 @@ def stream_csv_file(
     import csv
 
     TEXT_CANDIDATES = [
-        "text", "body", "content", "comment", "message",
-        "post", "tweet", "selftext", "full_text",
+        "text",
+        "body",
+        "content",
+        "comment",
+        "message",
+        "post",
+        "tweet",
+        "selftext",
+        "full_text",
     ]
     TS_CANDIDATES = [
-        "timestamp", "date", "created_at", "created_utc",
-        "published_at", "datetime",
+        "timestamp",
+        "date",
+        "created_at",
+        "created_utc",
+        "published_at",
+        "datetime",
     ]
 
     # Detect encoding
@@ -448,7 +468,9 @@ def stream_csv_file(
                 text_column = col_map[candidate]
                 break
     if text_column is None:
-        logger.error(f"Cannot detect text column in {path}. Columns: {reader.fieldnames}")
+        logger.error(
+            f"Cannot detect text column in {path}. Columns: {reader.fieldnames}"
+        )
         fh.close()
         return
 
@@ -486,6 +508,7 @@ def stream_csv_file(
 # ============================================================================
 # CORE: COLLECT ALL INSTANCES
 # ============================================================================
+
 
 def collect_instances(
     stream: Iterator[dict],
@@ -567,14 +590,16 @@ def collect_instances(
     # Save summary stats
     stats_path = output_path.replace(".jsonl", "_stats.json")
     with open(stats_path, "w") as f:
-        json.dump({
-            "total_records": total_records,
-            "total_matches": total_matches,
-            "unique_words_matched": len(match_counts),
-            "match_counts": dict(sorted(
-                match_counts.items(), key=lambda x: -x[1]
-            )),
-        }, f, indent=2)
+        json.dump(
+            {
+                "total_records": total_records,
+                "total_matches": total_matches,
+                "unique_words_matched": len(match_counts),
+                "match_counts": dict(sorted(match_counts.items(), key=lambda x: -x[1])),
+            },
+            f,
+            indent=2,
+        )
     logger.info(f"Stats saved to {stats_path}")
 
 
@@ -595,6 +620,7 @@ def _format_counts(counts: dict) -> str:
 # MAIN
 # ============================================================================
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Collect all instances of target words from Reddit or CSV data"
@@ -602,45 +628,37 @@ def main():
 
     # Word lists
     parser.add_argument(
-        "--words", nargs="+", required=True,
-        help="Path(s) to word list files (one word per line, or word<TAB>category)"
+        "--words",
+        nargs="+",
+        required=True,
+        help="Path(s) to word list files (one word per line, or word<TAB>category)",
     )
 
     # Data sources (pick one or more)
-    parser.add_argument(
-        "--reddit-file",
-        help="Single Reddit .zst dump file"
-    )
-    parser.add_argument(
-        "--reddit-dir",
-        help="Directory of per-subreddit Reddit dumps"
-    )
+    parser.add_argument("--reddit-file", help="Single Reddit .zst dump file")
+    parser.add_argument("--reddit-dir", help="Directory of per-subreddit Reddit dumps")
     parser.add_argument(
         "--reddit-monthly-dir",
-        help="Directory of monthly Reddit dumps (RC_YYYY-MM.zst)"
+        help="Directory of monthly Reddit dumps (RC_YYYY-MM.zst)",
     )
-    parser.add_argument(
-        "--csv-file",
-        help="Single CSV file"
-    )
-    parser.add_argument(
-        "--csv-dir",
-        help="Directory of CSV files"
-    )
+    parser.add_argument("--csv-file", help="Single CSV file")
+    parser.add_argument("--csv-dir", help="Directory of CSV files")
 
     # Filtering
     parser.add_argument(
         "--subreddits",
         help="Path to file listing subreddits to include (one per line). "
-             "If not set, all subreddits are included."
+        "If not set, all subreddits are included.",
     )
     parser.add_argument("--start-year", type=int, default=2015)
     parser.add_argument("--end-year", type=int, default=2026)
 
     # Context
     parser.add_argument(
-        "--context-sentences", type=int, default=2,
-        help="Number of surrounding sentences to include"
+        "--context-sentences",
+        type=int,
+        default=2,
+        help="Number of surrounding sentences to include",
     )
 
     # Output
@@ -648,8 +666,10 @@ def main():
 
     # SLURM support
     parser.add_argument(
-        "--slurm-task-id", type=int, default=None,
-        help="SLURM_ARRAY_TASK_ID — processes one monthly dump file"
+        "--slurm-task-id",
+        type=int,
+        default=None,
+        help="SLURM_ARRAY_TASK_ID — processes one monthly dump file",
     )
 
     args = parser.parse_args()
@@ -677,7 +697,9 @@ def main():
 
     elif args.reddit_dir:
         # Per-subreddit dumps: process each subreddit file
-        zst_files = sorted(glob.glob(os.path.join(args.reddit_dir, "**/*.zst"), recursive=True))
+        zst_files = sorted(
+            glob.glob(os.path.join(args.reddit_dir, "**/*.zst"), recursive=True)
+        )
         if not zst_files:
             zst_files = sorted(glob.glob(os.path.join(args.reddit_dir, "*.zst")))
         logger.info(f"Found {len(zst_files)} .zst files in {args.reddit_dir}")
@@ -696,15 +718,16 @@ def main():
             collect_instances(stream, matcher, out_path, args.context_sentences)
 
     elif args.reddit_monthly_dir:
-        dump_files = sorted(glob.glob(
-            os.path.join(args.reddit_monthly_dir, "RC_*.zst")
-        ))
+        dump_files = sorted(
+            glob.glob(os.path.join(args.reddit_monthly_dir, "RC_*.zst"))
+        )
         logger.info(f"Found {len(dump_files)} monthly dumps")
 
         # Group parts that belong to the same month
         # RC_2018-07.zst, RC_2018-07_part000.zst, RC_2018-07_part001.zst
         # all belong to "RC_2018-07"
         from collections import defaultdict
+
         month_groups = defaultdict(list)
         for f in dump_files:
             stem = Path(f).stem  # e.g. "RC_2018-07_part000"
@@ -718,13 +741,17 @@ def main():
         if args.slurm_task_id is not None:
             month_keys = sorted(month_groups.keys())
             if args.slurm_task_id >= len(month_keys):
-                logger.info(f"Task {args.slurm_task_id} >= {len(month_keys)} months, nothing to do")
+                logger.info(
+                    f"Task {args.slurm_task_id} >= {len(month_keys)} months, nothing to do"
+                )
                 return
 
             month_key = month_keys[args.slurm_task_id]
             parts = month_groups[month_key]
             out_path = os.path.join(args.output, f"{month_key}_matches.jsonl")
-            logger.info(f"SLURM task {args.slurm_task_id}: {month_key} ({len(parts)} files)")
+            logger.info(
+                f"SLURM task {args.slurm_task_id}: {month_key} ({len(parts)} files)"
+            )
 
             def stream_all_parts():
                 for part in sorted(parts):
@@ -736,7 +763,9 @@ def main():
                         subreddits=subreddits,
                     )
 
-            collect_instances(stream_all_parts(), matcher, out_path, args.context_sentences)
+            collect_instances(
+                stream_all_parts(), matcher, out_path, args.context_sentences
+            )
         else:
             # Sequential mode: process all months
             for month_key in sorted(month_groups.keys()):
@@ -759,7 +788,9 @@ def main():
                             subreddits=subreddits,
                         )
 
-                collect_instances(stream_all_parts(), matcher, out_path, args.context_sentences)
+                collect_instances(
+                    stream_all_parts(), matcher, out_path, args.context_sentences
+                )
 
     elif args.csv_file:
         stream = stream_csv_file(args.csv_file)
@@ -767,8 +798,8 @@ def main():
 
     elif args.csv_dir:
         csv_files = sorted(
-            glob.glob(os.path.join(args.csv_dir, "*.csv")) +
-            glob.glob(os.path.join(args.csv_dir, "*.tsv"))
+            glob.glob(os.path.join(args.csv_dir, "*.csv"))
+            + glob.glob(os.path.join(args.csv_dir, "*.tsv"))
         )
         logger.info(f"Found {len(csv_files)} CSV/TSV files")
 
@@ -780,8 +811,10 @@ def main():
             collect_instances(stream, matcher, out_path, args.context_sentences)
 
     else:
-        parser.error("Provide at least one data source: --reddit-file, --reddit-dir, "
-                      "--reddit-monthly-dir, --csv-file, or --csv-dir")
+        parser.error(
+            "Provide at least one data source: --reddit-file, --reddit-dir, "
+            "--reddit-monthly-dir, --csv-file, or --csv-dir"
+        )
 
 
 if __name__ == "__main__":
