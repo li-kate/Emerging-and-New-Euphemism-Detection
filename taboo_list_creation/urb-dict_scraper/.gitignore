@@ -1,0 +1,13 @@
+venv
+.mypy_cache
+.vscode
+*.db
+*-journal
+__pycache__
+results
+dist
+build
+*.egg-info
+*.pyc
+out
+UDdata/
