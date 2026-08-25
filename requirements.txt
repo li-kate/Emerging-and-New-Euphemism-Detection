@@ -1,0 +1,25 @@
+# Emerging and New Euphemism Detection — Python dependencies
+#
+# Install (CPU):
+#   pip install -r requirements.txt
+#
+# For GPU / SLURM jobs, install PyTorch for your CUDA version first:
+#   https://pytorch.org/get-started/locally/
+# then: pip install -r requirements.txt
+
+# ── Data collection (collect_instances.py, decompress.py) ──
+pyahocorasick>=2.0.0
+zstandard>=0.21.0
+
+# ── Cosine similarity drift (analyze_emerging_csd.py, merge_plot.py) ──
+numpy>=1.24.0
+scipy>=1.10.0
+scikit-learn>=1.3.0
+matplotlib>=3.7.0
+
+# ── Masked prediction (masked_prediction.py, merge_masked.py) ──
+# merge_masked.py also uses numpy + matplotlib (listed above)
+
+# ── BERT / transformer models (analyze_emerging_csd.py, masked_prediction.py) ──
+torch>=2.0.0
+transformers>=4.30.0
