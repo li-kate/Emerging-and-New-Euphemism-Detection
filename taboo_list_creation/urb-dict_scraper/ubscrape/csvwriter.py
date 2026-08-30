@@ -39,6 +39,8 @@ class CsvWriter:
                 self.rows.append([
                     word,
                     item["date"],
+                    item["upvotes"],
+                    item["downvotes"],
                     item["definition"]
                 ])
 

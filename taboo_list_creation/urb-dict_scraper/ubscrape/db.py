@@ -3,7 +3,7 @@ import sqlite3
 from .jsonwriter import JsonWriter
 from .csvwriter import CsvWriter
 
-DB_FILE_NAME = 'urban-dict.db'
+DB_FILE_NAME = 'urban-dict-drugs.db'
 
 
 def get_connection():
@@ -25,6 +25,8 @@ def initialize_db():
     word_id text NOT NULL,
     definition text NOT NULL,
     date text,
+    upvotes integer,
+    downvotes integer,
     FOREIGN KEY (word_id) REFERENCES word (word)
     );''')
 
@@ -63,14 +65,26 @@ def dump_database(arg, csv=False):
     prev_word = ''
     definition_list = []
 
-    query = 'SELECT word.word, definition.definition, definition.date FROM definition INNER JOIN word ON definition.word_id=word.word ORDER BY word.word ASC;'
-
-    for (word, definition, date) in con.execute(query).fetchall():
+    query = '''
+            SELECT
+                word.word,
+                definition.definition,
+                definition.date,
+                definition.upvotes,
+                definition.downvotes
+            FROM definition
+            INNER JOIN word
+                ON definition.word_id = word.word
+            ORDER BY word.word ASC;
+        '''
+    
+    for (word, definition, date, upvotes, downvotes) in con.execute(query).fetchall():
         if word == prev_word:
-            # add to the same set
             definition_list.append({
                 "definition": definition,
-                "date": date
+                "date": date,
+                "upvotes": upvotes,
+                "downvotes": downvotes
             })
 
         if word != prev_word:
@@ -80,7 +94,9 @@ def dump_database(arg, csv=False):
             prev_word = word
             definition_list = [{
                 "definition": definition,
-                "date": date
+                "date": date,
+                "upvotes": upvotes,
+                "downvotes": downvotes
             }]
 
     writer.write_word(prev_word, definition_list)

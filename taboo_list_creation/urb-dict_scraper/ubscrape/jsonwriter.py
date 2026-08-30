@@ -73,8 +73,11 @@ class JsonWriter:
                 lambda total, item:
                     total
                     + len(item["definition"])
-                    + (len(item["date"]) if item["date"] else 0),
+                    + (len(item["date"]) if item["date"] else 0)
+                    + len(str(item["upvotes"]))
+                    + len(str(item["downvotes"])),
                 defs,
                 4 * len(defs)
             )
+
         return reduce(reduce_f, self.pool, 2)

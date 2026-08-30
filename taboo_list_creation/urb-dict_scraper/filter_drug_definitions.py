@@ -14,7 +14,7 @@ OUTPUT_FILE = "drug_matches.json"
 
 # Definitions containing drug terms before this date
 # cause the ENTIRE normalized word to be excluded.
-CUTOFF_DATE = datetime(2018, 1, 1)
+CUTOFF_DATE = datetime(2015, 1, 1)
 
 # Maximum number of words allowed in a term.
 MAX_WORDS = 2
