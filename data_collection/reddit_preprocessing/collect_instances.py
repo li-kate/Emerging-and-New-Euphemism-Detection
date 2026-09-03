@@ -1,53 +1,3 @@
-"""
-============================================================================
-EXHAUSTIVE INSTANCE COLLECTION
-============================================================================
-
-Finds every occurrence of target words across Reddit dumps or CSV files.
-Saves each match with full context, timestamp, source metadata, and
-which words were found.
-
-This collects ALL instances — euphemistic, literal, and ambiguous.
-The temporal analysis (Stage 2) determines which are which.
-
-Usage:
-    # Reddit per-subreddit dumps
-    python collect_instances.py \
-        --words euphemisms.txt taboo_keywords.txt comparison_words.txt \
-        --reddit-dir ./reddit_dumps/ \
-        --output ./matches/reddit_matches.jsonl
-
-    # Reddit monthly dumps (full scan)
-    python collect_instances.py \
-        --words euphemisms.txt \
-        --reddit-monthly-dir ./monthly_dumps/ \
-        --output ./matches/full_reddit_matches.jsonl
-
-    # CSV files
-    python collect_instances.py \
-        --words euphemisms.txt \
-        --csv-dir ./csv_data/ \
-        --output ./matches/csv_matches.jsonl
-
-    # Single Reddit file (for testing)
-    python collect_instances.py \
-        --words euphemisms.txt \
-        --reddit-file ./RC_2020-01.zst \
-        --output ./matches/test_matches.jsonl
-
-    # SLURM array (one monthly dump per task)
-    python collect_instances.py \
-        --words euphemisms.txt \
-        --reddit-monthly-dir ./monthly_dumps/ \
-        --output ./matches/ \
-        --slurm-task-id $SLURM_ARRAY_TASK_ID
-
-    # RUN THIS: python3 collect_instances.py --words drug_words.txt anchors_and_baselines.txt comparison_words.txt --reddit-file ./RC_2020-09.zst --output ./matches/2020-09_matches.jsonl
-
-Required: pip install pyahocorasick zstandard
-============================================================================
-"""
-
 import argparse
 import glob
 import io
@@ -55,8 +5,10 @@ import json
 import logging
 import os
 import re
+from collections import defaultdict
 from collections.abc import Iterator
-from datetime import datetime
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from datetime import datetime, timezone
 from pathlib import Path
 
 logging.basicConfig(
@@ -65,95 +17,64 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+URL_RE = re.compile(r"https?://\S+")
+WHITESPACE_RE = re.compile(r"\s+")
+
+# ----------------------------------------------------------------------------
+# JSON backend: prefer orjson for hot-path speed, fall back to stdlib json.
+# ----------------------------------------------------------------------------
+try:
+    import orjson
+
+    def _json_loads(s: str):
+        return orjson.loads(s)
+
+    def _json_dumps(obj) -> str:
+        return orjson.dumps(obj).decode("utf-8")
+
+    logger.info("Using orjson for JSON parsing/serialization")
+except ImportError:
+    logger.warning("orjson not installed — falling back to stdlib json (slower). "
+                    "Install with: pip install orjson")
+
+    def _json_loads(s: str):
+        return json.loads(s)
+
+    def _json_dumps(obj) -> str:
+        return json.dumps(obj, ensure_ascii=False)
+
 
 # ============================================================================
 # WORD LIST LOADING
 # ============================================================================
 
 
-def load_word_list(path: str) -> dict[str, str]:
+def load_word_lists(paths: list[str]) -> dict[str, str]:
     """
-    Load words from a text file. Supports multiple formats:
+    Load and merge word list files (one word per line).
 
-    Simple (one word per line):
-        snow
-        ice
-        pot
+    Each word is tagged with its source filename (without extension) as
+    its category, so you can distinguish euphemisms from comparison
+    words in the output — e.g. words in euphemisms.txt get category
+    "euphemisms".
 
-    Tab-separated (word<TAB>drug_ref<TAB>date<TAB>source — only first 2 cols used):
-        snow	cocaine	pre-2015	dea_2017
-        fenty	fentanyl	2017	dea_2017
-        needle	comparison
-
-    Bullet list (markdown-style — strips bullets and metadata after " - "):
-        * Skittles - urban dictionary says 2011 - means adderall
-        * Fenty (urban dictionary shows earliest 2019)
-        - needle
-        - pharmacy
-
-    Returns dict: word -> category (or "unknown" if no category)
-    """
-    words = {}
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-
-            # Strip markdown bullets
-            if line.startswith(("* ", "- ", "+ ")):
-                line = line[2:].strip()
-            if line.startswith(("*", "-")) and len(line) > 1 and line[1] == " ":
-                line = line[2:].strip()
-
-            # Try tab-separated first
-            parts = line.split("\t")
-            if len(parts) >= 2:
-                word = parts[0].strip().lower()
-                category = parts[1].strip()
-                if word:
-                    words[word] = category
-                continue
-
-            # Handle bullet-list format: "Skittles - means adderall"
-            # or "Fenty (urban dictionary shows earliest 2019)"
-            # Extract just the word/phrase before any annotation
-            # Remove parenthetical notes
-            clean = re.sub(r"\(.*?\)", "", line).strip()
-            # Split on " - " to separate word from notes
-            if " - " in clean:
-                clean = clean.split(" - ")[0].strip()
-
-            word = clean.lower().strip()
-            if word:
-                words[word] = "unknown"
-
-    logger.info(f"Loaded {len(words)} words from {path}")
-    return words
-
-
-def load_multiple_word_lists(paths: list[str]) -> dict[str, str]:
-    """
-    Load and merge multiple word list files.
-
-    If a word has no category (plain text file), it gets tagged
-    with the filename as its category. This way you can tell
-    euphemisms from comparison words in the output.
-
-    Example:
-        euphemisms.txt contains "snow" → category = "euphemisms"
-        comparison_words.txt contains "needle" → category = "comparison_words"
+    NOTE: if the same word appears in multiple files, the later file's
+    category silently wins. Word lists are reviewed manually in this
+    workflow, so no collision warning is emitted.
     """
     merged = {}
     for path in paths:
-        # Use filename (without extension) as default category
-        file_category = os.path.splitext(os.path.basename(path))[0]
-        words = load_word_list(path)
-        for word, category in words.items():
-            if category == "unknown":
-                merged[word] = file_category
-            else:
-                merged[word] = category
+        category = os.path.splitext(os.path.basename(path))[0]
+        count = 0
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                merged[line.lower()] = category
+                count += 1
+        logger.info(f"Loaded {count} words from {path}")
+
     logger.info(f"Total: {len(merged)} unique words from {len(paths)} files")
     return merged
 
@@ -164,84 +85,39 @@ def load_multiple_word_lists(paths: list[str]) -> dict[str, str]:
 
 
 class Matcher:
-    """
-    Fast multi-pattern string matcher using Aho-Corasick.
-
-    Finds all occurrences of all target words in a single pass
-    through the text. Word boundary checking ensures "pot" matches
-    in "smoked pot yesterday" but not in "potato" or "spotless".
-    """
+    """Fast multi-pattern string matcher using Aho-Corasick."""
 
     def __init__(self, words: dict[str, str]):
-        """
-        Args:
-            words: dict mapping word -> category
-        """
         self.words = words
-        self._backend = None
-        self._automaton = None
-        self._build()
-
-    def _build(self):
         try:
             import ahocorasick
+        except ImportError as exc:
+            raise RuntimeError(
+                "pyahocorasick is required. Install it with: pip install pyahocorasick"
+            ) from exc
 
-            A = ahocorasick.Automaton()
-            for word, category in self.words.items():
-                A.add_word(word.lower(), (word, category))
-            A.make_automaton()
-            self._automaton = A
-            self._backend = "pyahocorasick"
-            logger.info(f"Matcher built ({self._backend}): {len(self.words)} patterns")
-        except ImportError:
-            logger.warning(
-                "pyahocorasick not installed — using naive matching. "
-                "This will be MUCH slower. Install: pip install pyahocorasick"
-            )
-            self._backend = "naive"
+        automaton = ahocorasick.Automaton()
+        for word, category in words.items():
+            automaton.add_word(word.lower(), (word, category))
+        automaton.make_automaton()
+        self._automaton = automaton
+        logger.info("Matcher built (pyahocorasick): %d patterns", len(words))
 
     def find(self, text: str) -> list[dict]:
-        """
-        Find all target word occurrences in text.
-
-        Returns list of:
-            {"word": str, "category": str, "start": int, "end": int}
-        """
+        """Find all target word occurrences in text."""
         text_lower = text.lower()
         matches = []
 
-        if self._backend == "pyahocorasick":
-            for end_idx, (word, category) in self._automaton.iter(text_lower):
-                start = end_idx - len(word) + 1
-                end = end_idx + 1
-                if self._is_word_boundary(text_lower, start, end):
-                    matches.append(
-                        {
-                            "word": word,
-                            "category": category,
-                            "start": start,
-                            "end": end,
-                        }
-                    )
-        else:
-            for word, category in self.words.items():
-                idx = 0
-                word_lower = word.lower()
-                while True:
-                    pos = text_lower.find(word_lower, idx)
-                    if pos == -1:
-                        break
-                    end = pos + len(word_lower)
-                    if self._is_word_boundary(text_lower, pos, end):
-                        matches.append(
-                            {
-                                "word": word,
-                                "category": category,
-                                "start": pos,
-                                "end": end,
-                            }
-                        )
-                    idx = pos + 1
+        for end_idx, (word, category) in self._automaton.iter(text_lower):
+            start = end_idx - len(word) + 1
+            end = end_idx + 1
+            if self._is_word_boundary(text_lower, start, end):
+                matches.append({
+                    "word": word,
+                    "category": category,
+                    "start": start,
+                    "end": end,
+                })
 
         return matches
 
@@ -299,6 +175,9 @@ def stream_reddit_file(
 
     except zstd.ZstdError as e:
         logger.warning(f"  stream_reader failed ({e}), trying decompressobj...")
+        # NOTE: this reopens the file from byte 0. Any records already
+        # yielded above by strategy 1 will be reprocessed and re-yielded
+        # by strategy 2 below — known limitation, not yet deduped upstream.
         fh.close()
 
         # Strategy 2: decompressobj handles concatenated frames and
@@ -345,13 +224,17 @@ def stream_reddit_file(
                 if count % 5_000_000 == 0:
                     logger.info(f"  {path}: read {count:,}, yielded {yielded:,}")
 
-        # Process any remaining leftover
+        # Process any remaining leftover (FIXED: this used to increment
+        # `yielded` without actually yielding the record, silently
+        # dropping the final line of the file).
         if leftover.strip():
             result = _process_reddit_line(
                 leftover.strip(), start_year, end_year, subreddits
             )
+            count += 1
             if result is not None:
                 yielded += 1
+                yield result
 
         fh.close()
 
@@ -370,8 +253,8 @@ def _process_reddit_line(
 ) -> dict | None:
     """Process a single JSON line from a Reddit dump. Returns dict or None."""
     try:
-        obj = json.loads(line)
-    except json.JSONDecodeError:
+        obj = _json_loads(line)
+    except ValueError:
         return None
 
     # Subreddit filter
@@ -386,19 +269,20 @@ def _process_reddit_line(
         return None
 
     # Timestamp and year filter
-    ts_raw = obj.get("created_utc", "")
+    ts_raw = obj.get("created_utc")
     try:
-        ts_float = float(ts_raw)
-        year = datetime.utcfromtimestamp(ts_float).year
-        if year < start_year or year > end_year:
-            return None
-        timestamp = datetime.utcfromtimestamp(ts_float).isoformat() + "Z"
-    except (ValueError, OverflowError, OSError):
-        timestamp = str(ts_raw)
+        timestamp_dt = datetime.fromtimestamp(float(ts_raw), tz=timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+    if not start_year <= timestamp_dt.year <= end_year:
+        return None
+
+    timestamp = timestamp_dt.isoformat().replace("+00:00", "Z")
 
     # Minimal cleaning
-    body = re.sub(r"https?://\S+", "", body)
-    body = re.sub(r"\s+", " ", body).strip()
+    body = URL_RE.sub("", body)
+    body = WHITESPACE_RE.sub(" ", body).strip()
 
     if len(body.split()) < 3:
         return None
@@ -410,99 +294,6 @@ def _process_reddit_line(
         "permalink": obj.get("permalink", ""),
         "source": "reddit",
     }
-
-
-# ============================================================================
-# CSV STREAMING
-# ============================================================================
-
-
-def stream_csv_file(
-    path: str,
-    text_column: str | None = None,
-    timestamp_column: str | None = None,
-) -> Iterator[dict]:
-    """
-    Stream text records from a CSV file.
-
-    Auto-detects text and timestamp columns if not specified.
-    """
-    import csv
-
-    TEXT_CANDIDATES = [
-        "text",
-        "body",
-        "content",
-        "comment",
-        "message",
-        "post",
-        "tweet",
-        "selftext",
-        "full_text",
-    ]
-    TS_CANDIDATES = [
-        "timestamp",
-        "date",
-        "created_at",
-        "created_utc",
-        "published_at",
-        "datetime",
-    ]
-
-    # Detect encoding
-    try:
-        fh = open(path, "r", encoding="utf-8", newline="")
-        fh.readline()
-        fh.seek(0)
-    except UnicodeDecodeError:
-        fh = open(path, "r", encoding="latin-1", newline="")
-
-    reader = csv.DictReader(fh)
-    columns = [c.strip().lower() for c in (reader.fieldnames or [])]
-    col_map = {c.strip().lower(): c for c in (reader.fieldnames or [])}
-
-    # Auto-detect columns
-    if text_column is None:
-        for candidate in TEXT_CANDIDATES:
-            if candidate in columns:
-                text_column = col_map[candidate]
-                break
-    if text_column is None:
-        logger.error(
-            f"Cannot detect text column in {path}. Columns: {reader.fieldnames}"
-        )
-        fh.close()
-        return
-
-    if timestamp_column is None:
-        for candidate in TS_CANDIDATES:
-            if candidate in columns:
-                timestamp_column = col_map[candidate]
-                break
-
-    logger.info(f"CSV {path}: text={text_column}, timestamp={timestamp_column}")
-
-    count = 0
-    for row in reader:
-        text = (row.get(text_column) or "").strip()
-        if not text or len(text.split()) < 3:
-            continue
-
-        ts = ""
-        if timestamp_column:
-            ts = (row.get(timestamp_column) or "").strip()
-
-        count += 1
-        yield {
-            "text": text,
-            "timestamp": ts,
-            "subreddit": "",
-            "permalink": "",
-            "source": os.path.basename(path),
-        }
-
-    fh.close()
-    logger.info(f"CSV {path}: {count} records yielded")
 
 
 # ============================================================================
@@ -523,15 +314,14 @@ def collect_instances(
         - word: the matched word
         - category: from the word list (e.g., "cocaine", "comparison")
         - sentence: the sentence containing the match
-        - context: surrounding text (full comment/post, up to N sentences)
         - timestamp: from the source
         - subreddit: if from Reddit
         - source: data source identifier
 
-    Note: We save the FULL comment/post text as context rather than
-    trying to split into sentences and extract a window. Reddit
-    comments are usually short enough that the full text IS the context.
-    For longer texts, we truncate to ±context_sentences around the match.
+    NOTE: `context_sentences` is currently accepted but not applied —
+    the full comment/post text is always written to `sentence` as-is,
+    with no sentence-level windowing. See discussion for a proposed
+    implementation if tighter context windows are needed.
     """
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
@@ -548,16 +338,13 @@ def collect_instances(
             if not matches:
                 continue
 
-            # Deduplicate matches — same word at same position
+            # Deduplicate matches while preserving output behavior.
             seen = set()
-            unique_matches = []
             for match in matches:
                 key = (match["word"], match["start"])
-                if key not in seen:
-                    seen.add(key)
-                    unique_matches.append(match)
-
-            for match in unique_matches:
+                if key in seen:
+                    continue
+                seen.add(key)
                 total_matches += 1
                 word = match["word"]
                 match_counts[word] = match_counts.get(word, 0) + 1
@@ -572,7 +359,7 @@ def collect_instances(
                     "source": record["source"],
                 }
 
-                out.write(json.dumps(output_record, ensure_ascii=False) + "\n")
+                out.write(_json_dumps(output_record) + "\n")
 
             if total_records % 1_000_000 == 0:
                 logger.info(
@@ -587,7 +374,8 @@ def collect_instances(
     )
     logger.info(f"Match counts per word:\n{_format_counts(match_counts)}")
 
-    # Save summary stats
+    # Save summary stats (stdlib json here — not a hot path, and indent
+    # formatting for human readability matters more than speed).
     stats_path = output_path.replace(".jsonl", "_stats.json")
     with open(stats_path, "w") as f:
         json.dump(
@@ -617,13 +405,79 @@ def _format_counts(counts: dict) -> str:
 
 
 # ============================================================================
+# PARALLEL WORKER (module-level so it's picklable for ProcessPoolExecutor)
+# ============================================================================
+
+
+def _process_source_job(job: dict):
+    """
+    Process one independent unit of work (a single file, or all parts
+    of a single month) in isolation. Safe to run in a worker process.
+
+    Rebuilds its own Matcher from the shared `words` dict rather than
+    receiving a pre-built Matcher, since the pyahocorasick automaton
+    is a C-extension object and isn't reliably picklable across
+    process boundaries.
+
+    Any exception is caught and logged here so that one bad/corrupt
+    dump file doesn't take down an entire parallel batch.
+    """
+    label = job.get("label", job["output_path"])
+    try:
+        if os.path.exists(job["output_path"]):
+            logger.info(f"Skipping {label} — output already exists")
+            return
+
+        matcher = Matcher(job["words"])
+
+        def stream_all():
+            for part in job["parts"]:
+                logger.info(f"  [{label}] streaming: {Path(part).name}")
+                yield from stream_reddit_file(
+                    part,
+                    start_year=job["start_year"],
+                    end_year=job["end_year"],
+                    subreddits=job["subreddits"],
+                )
+
+        logger.info(f"Processing: {label} -> {job['output_path']}")
+        collect_instances(
+            stream_all(), matcher, job["output_path"], job["context_sentences"]
+        )
+
+    except Exception:
+        logger.exception(f"Failed processing {label} — skipping and continuing")
+
+
+def _run_jobs(jobs: list[dict], workers: int):
+    """Run a list of independent jobs, in parallel if workers > 1."""
+    if workers <= 1:
+        for job in jobs:
+            _process_source_job(job)
+        return
+
+    logger.info(f"Running {len(jobs)} jobs with {workers} parallel workers")
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_process_source_job, job): job for job in jobs}
+        for future in as_completed(futures):
+            job = futures[future]
+            label = job.get("label", job["output_path"])
+            try:
+                future.result()
+            except Exception:
+                # _process_source_job already catches/logs internally,
+                # but guard here too in case of a process-level crash.
+                logger.exception(f"Worker crashed while processing {label}")
+
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Collect all instances of target words from Reddit or CSV data"
+        description="Collect all instances of target words from Reddit data"
     )
 
     # Word lists
@@ -641,9 +495,6 @@ def main():
         "--reddit-monthly-dir",
         help="Directory of monthly Reddit dumps (RC_YYYY-MM.zst)",
     )
-    parser.add_argument("--csv-file", help="Single CSV file")
-    parser.add_argument("--csv-dir", help="Directory of CSV files")
-
     # Filtering
     parser.add_argument(
         "--subreddits",
@@ -672,11 +523,20 @@ def main():
         help="SLURM_ARRAY_TASK_ID — processes one monthly dump file",
     )
 
+    # Parallelism (used for --reddit-dir and non-SLURM --reddit-monthly-dir)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of parallel worker processes for independent "
+        "files/months. Ignored in --slurm-task-id mode, since SLURM's "
+        "job array already parallelizes at the cluster level.",
+    )
+
     args = parser.parse_args()
 
     # Load word lists
-    words = load_multiple_word_lists(args.words)
-    matcher = Matcher(words)
+    words = load_word_lists(args.words)
 
     # Load subreddit filter
     subreddits = None
@@ -685,15 +545,23 @@ def main():
             subreddits = {line.strip() for line in f if line.strip()}
         logger.info(f"Filtering to {len(subreddits)} subreddits")
 
+    common = dict(
+        words=words,
+        start_year=args.start_year,
+        end_year=args.end_year,
+        subreddits=subreddits,
+        context_sentences=args.context_sentences,
+    )
+
     # Build data stream
     if args.reddit_file:
-        stream = stream_reddit_file(
-            args.reddit_file,
-            start_year=args.start_year,
-            end_year=args.end_year,
-            subreddits=subreddits,
-        )
-        collect_instances(stream, matcher, args.output, args.context_sentences)
+        job = {
+            **common,
+            "parts": [args.reddit_file],
+            "output_path": args.output,
+            "label": args.reddit_file,
+        }
+        _process_source_job(job)
 
     elif args.reddit_dir:
         # Per-subreddit dumps: process each subreddit file
@@ -704,18 +572,18 @@ def main():
             zst_files = sorted(glob.glob(os.path.join(args.reddit_dir, "*.zst")))
         logger.info(f"Found {len(zst_files)} .zst files in {args.reddit_dir}")
 
+        jobs = []
         for zst_file in zst_files:
             name = Path(zst_file).stem
             out_path = args.output.replace(".jsonl", f"_{name}.jsonl")
-            logger.info(f"\nProcessing: {zst_file} -> {out_path}")
+            jobs.append({
+                **common,
+                "parts": [zst_file],
+                "output_path": out_path,
+                "label": zst_file,
+            })
 
-            stream = stream_reddit_file(
-                zst_file,
-                start_year=args.start_year,
-                end_year=args.end_year,
-                subreddits=subreddits,
-            )
-            collect_instances(stream, matcher, out_path, args.context_sentences)
+        _run_jobs(jobs, args.workers)
 
     elif args.reddit_monthly_dir:
         dump_files = sorted(
@@ -726,8 +594,6 @@ def main():
         # Group parts that belong to the same month
         # RC_2018-07.zst, RC_2018-07_part000.zst, RC_2018-07_part001.zst
         # all belong to "RC_2018-07"
-        from collections import defaultdict
-
         month_groups = defaultdict(list)
         for f in dump_files:
             stem = Path(f).stem  # e.g. "RC_2018-07_part000"
@@ -737,7 +603,9 @@ def main():
 
         logger.info(f"Grouped into {len(month_groups)} months")
 
-        # SLURM array mode: process one month (all its parts)
+        # SLURM array mode: process one month (all its parts).
+        # Parallelism is provided by the job array itself, so --workers
+        # is not used here.
         if args.slurm_task_id is not None:
             month_keys = sorted(month_groups.keys())
             if args.slurm_task_id >= len(month_keys):
@@ -747,73 +615,34 @@ def main():
                 return
 
             month_key = month_keys[args.slurm_task_id]
-            parts = month_groups[month_key]
+            parts = sorted(month_groups[month_key])
             out_path = os.path.join(args.output, f"{month_key}_matches.jsonl")
-            logger.info(
-                f"SLURM task {args.slurm_task_id}: {month_key} ({len(parts)} files)"
-            )
-
-            def stream_all_parts():
-                for part in sorted(parts):
-                    logger.info(f"  Streaming: {Path(part).name}")
-                    yield from stream_reddit_file(
-                        part,
-                        start_year=args.start_year,
-                        end_year=args.end_year,
-                        subreddits=subreddits,
-                    )
-
-            collect_instances(
-                stream_all_parts(), matcher, out_path, args.context_sentences
-            )
+            job = {
+                **common,
+                "parts": parts,
+                "output_path": out_path,
+                "label": f"SLURM task {args.slurm_task_id}: {month_key}",
+            }
+            _process_source_job(job)
         else:
-            # Sequential mode: process all months
+            # Sequential/parallel mode: process all months
+            jobs = []
             for month_key in sorted(month_groups.keys()):
-                parts = month_groups[month_key]
+                parts = sorted(month_groups[month_key])
                 out_path = os.path.join(args.output, f"{month_key}_matches.jsonl")
+                jobs.append({
+                    **common,
+                    "parts": parts,
+                    "output_path": out_path,
+                    "label": month_key,
+                })
 
-                if os.path.exists(out_path):
-                    logger.info(f"Skipping {month_key} — already exists")
-                    continue
-
-                logger.info(f"\nProcessing: {month_key} ({len(parts)} files)")
-
-                def stream_all_parts(parts=parts):
-                    for part in sorted(parts):
-                        logger.info(f"  Streaming: {Path(part).name}")
-                        yield from stream_reddit_file(
-                            part,
-                            start_year=args.start_year,
-                            end_year=args.end_year,
-                            subreddits=subreddits,
-                        )
-
-                collect_instances(
-                    stream_all_parts(), matcher, out_path, args.context_sentences
-                )
-
-    elif args.csv_file:
-        stream = stream_csv_file(args.csv_file)
-        collect_instances(stream, matcher, args.output, args.context_sentences)
-
-    elif args.csv_dir:
-        csv_files = sorted(
-            glob.glob(os.path.join(args.csv_dir, "*.csv"))
-            + glob.glob(os.path.join(args.csv_dir, "*.tsv"))
-        )
-        logger.info(f"Found {len(csv_files)} CSV/TSV files")
-
-        for csv_file in csv_files:
-            name = Path(csv_file).stem
-            out_path = args.output.replace(".jsonl", f"_{name}.jsonl")
-            logger.info(f"\nProcessing: {csv_file}")
-            stream = stream_csv_file(csv_file)
-            collect_instances(stream, matcher, out_path, args.context_sentences)
+            _run_jobs(jobs, args.workers)
 
     else:
         parser.error(
             "Provide at least one data source: --reddit-file, --reddit-dir, "
-            "--reddit-monthly-dir, --csv-file, or --csv-dir"
+            "--reddit-monthly-dir"
         )
 
 
