@@ -323,73 +323,95 @@ def collect_instances(
     with no sentence-level windowing. See discussion for a proposed
     implementation if tighter context windows are needed.
     """
+    
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+    temp_path = output_path + ".tmp"
 
     total_records = 0
     total_matches = 0
-    match_counts = {}  # word -> count
+    match_counts = {}
 
-    with open(output_path, "w", encoding="utf-8") as out:
-        for record in stream:
-            total_records += 1
-            text = record["text"]
+    try:
+        with open(temp_path, "w", encoding="utf-8") as out:
+            for record in stream:
+                total_records += 1
+                text = record["text"]
 
-            matches = matcher.find(text)
-            if not matches:
-                continue
-
-            # Deduplicate matches while preserving output behavior.
-            seen = set()
-            for match in matches:
-                key = (match["word"], match["start"])
-                if key in seen:
+                matches = matcher.find(text)
+                if not matches:
                     continue
-                seen.add(key)
-                total_matches += 1
-                word = match["word"]
-                match_counts[word] = match_counts.get(word, 0) + 1
 
-                output_record = {
-                    "word": word,
-                    "category": match["category"],
-                    "sentence": text,  # Full comment as the sentence
-                    "timestamp": record["timestamp"],
-                    "subreddit": record.get("subreddit", ""),
-                    "permalink": record.get("permalink", ""),
-                    "source": record["source"],
-                }
+                seen = set()
+                for match in matches:
+                    key = (match["word"], match["start"])
+                    if key in seen:
+                        continue
+                    seen.add(key)
 
-                out.write(_json_dumps(output_record) + "\n")
+                    total_matches += 1
+                    word = match["word"]
+                    match_counts[word] = match_counts.get(word, 0) + 1
 
-            if total_records % 1_000_000 == 0:
-                logger.info(
-                    f"Processed {total_records:,} records | "
-                    f"{total_matches:,} total matches | "
-                    f"top words: {_top_n(match_counts, 5)}"
-                )
+                    output_record = {
+                        "word": word,
+                        "category": match["category"],
+                        "sentence": text,
+                        "timestamp": record["timestamp"],
+                        "subreddit": record.get("subreddit", ""),
+                        "permalink": record.get("permalink", ""),
+                        "source": record["source"],
+                    }
 
-    logger.info(
-        f"\nDone: {total_records:,} records processed, "
-        f"{total_matches:,} matches saved to {output_path}"
-    )
-    logger.info(f"Match counts per word:\n{_format_counts(match_counts)}")
+                    out.write(_json_dumps(output_record) + "\n")
 
-    # Save summary stats (stdlib json here — not a hot path, and indent
-    # formatting for human readability matters more than speed).
-    stats_path = output_path.replace(".jsonl", "_stats.json")
-    with open(stats_path, "w") as f:
-        json.dump(
-            {
-                "total_records": total_records,
-                "total_matches": total_matches,
-                "unique_words_matched": len(match_counts),
-                "match_counts": dict(sorted(match_counts.items(), key=lambda x: -x[1])),
-            },
-            f,
-            indent=2,
+                if total_records % 1_000_000 == 0:
+                    logger.info(
+                        f"Processed {total_records:,} records | "
+                        f"{total_matches:,} total matches | "
+                        f"top words: {_top_n(match_counts, 5)}"
+                    )
+
+        if total_matches == 0:
+            os.remove(temp_path)
+            logger.info(
+                f"No matches found after processing {total_records:,} records — "
+                f"no output file created"
+            )
+            return
+
+        os.replace(temp_path, output_path)
+
+        logger.info(
+            f"\nDone: {total_records:,} records processed, "
+            f"{total_matches:,} matches saved to {output_path}"
         )
-    logger.info(f"Stats saved to {stats_path}")
+        logger.info(f"Match counts per word:\n{_format_counts(match_counts)}")
 
+        stats_path = output_path.replace(".jsonl", "_stats.json")
+        with open(stats_path, "w") as f:
+            json.dump(
+                {
+                    "total_records": total_records,
+                    "total_matches": total_matches,
+                    "unique_words_matched": len(match_counts),
+                    "match_counts": dict(
+                        sorted(
+                            match_counts.items(),
+                            key=lambda x: -x[1],
+                        )
+                    ),
+                },
+                f,
+                indent=2,
+            )
+
+        logger.info(f"Stats saved to {stats_path}")
+
+    except Exception:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise
 
 def _top_n(counts: dict, n: int) -> str:
     top = sorted(counts.items(), key=lambda x: -x[1])[:n]
