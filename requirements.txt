@@ -10,6 +10,7 @@
 # ── Data collection (collect_instances.py, decompress.py) ──
 pyahocorasick>=2.0.0
 zstandard>=0.21.0
+orjson
 
 # ── Cosine similarity drift (analyze_emerging_csd.py, merge_plot.py) ──
 numpy>=1.24.0
@@ -23,4 +24,6 @@ matplotlib>=3.7.0
 # ── BERT / transformer models (analyze_emerging_csd.py, masked_prediction.py) ──
 torch>=2.0.0
 transformers>=4.30.0
+
+# Styling
 ruff
