@@ -1,3 +1,4 @@
+drug
 acetaminophen
 oxycodone
 percocet
@@ -12,7 +13,6 @@ suboxone
 clonazepam
 cocaine
 klonopin
-coke
 ecstasy
 mdma
 molly
