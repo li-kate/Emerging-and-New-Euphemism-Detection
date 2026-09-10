@@ -1,6 +1,7 @@
 venv
 .mypy_cache
 .vscode
+.DS_Store
 *.db
 *-journal
 __pycache__
