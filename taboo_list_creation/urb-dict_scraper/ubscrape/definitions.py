@@ -342,11 +342,55 @@ def define_word(word: str) -> List[Dict]:
 
     return results
 
-def write_definition(word_t: Tuple[str]):
+def fetch_definition(word_t: Tuple[str]):
+
+    """
+    Worker function.
+
+    This runs in parallel and ONLY makes HTTP requests.
+    It does NOT access SQLite.
+    """
 
     word = word_t[0]
 
-    definitions = define_word(word)
+    try:
+        definitions = define_word(word)
+
+        return {
+            'word': word,
+            'definitions': definitions,
+            'success': True
+        }
+
+    except Exception as e:
+
+        print(
+            f'ERROR fetching "{word}": {e}'
+        )
+
+        return {
+            'word': word,
+            'definitions': [],
+            'success': False
+        }
+
+
+def save_definition(result):
+
+    """
+    Runs only in the main process.
+
+    This is the ONLY function that writes to SQLite,
+    preventing 'database is locked' errors.
+    """
+
+    word = result['word']
+    definitions = result['definitions']
+
+    # Do not mark the word complete if the request failed.
+    # This allows it to be retried in a future run.
+    if not result['success']:
+        return
 
     formatted_defs = []
 
@@ -362,50 +406,110 @@ def write_definition(word_t: Tuple[str]):
             )
         )
 
-    if formatted_defs:
+    try:
 
-        CON.executemany(
-            '''
-            INSERT INTO definition
-            (
-                definition,
-                date,
-                upvotes,
-                downvotes,
-                word_id
+        # Save all definitions for this word.
+        if formatted_defs:
+
+            CON.executemany(
+                '''
+                INSERT INTO definition
+                (
+                    definition,
+                    date,
+                    upvotes,
+                    downvotes,
+                    word_id
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ''',
+                formatted_defs
             )
-            VALUES (?, ?, ?, ?, ?)
+
+        # Only mark the word complete after successfully
+        # saving its definitions.
+        CON.execute(
+            '''
+            UPDATE word
+            SET complete = 1
+            WHERE word = ?
             ''',
-            formatted_defs
+            (word,)
         )
 
-    CON.execute(
-        'UPDATE word SET complete = 1 WHERE word = ?',
-        word_t
-    )
+        CON.commit()
 
-    CON.commit()
+    except Exception as e:
 
-    return definitions
+        CON.rollback()
+
+        print(
+            f'ERROR saving "{word}": {e}'
+        )
 
 
 def define_all_words():
 
-    pool = mp.Pool(mp.cpu_count())
-
     words = CON.execute(
-        'SELECT word FROM word WHERE complete = 0'
+        '''
+        SELECT word
+        FROM word
+        WHERE complete = 0
+        '''
     ).fetchall()
 
     print(
         f'{len(words)} words need definitions.'
     )
 
-    pool.map(
-        write_definition,
-        words,
-        chunksize=200
+    if not words:
+
+        print(
+            'All words already have definitions.'
+        )
+
+        return
+
+    # Don't use every CPU automatically.
+    #
+    # Too many simultaneous requests may cause Urban
+    # Dictionary to rate-limit or block the scraper.
+    workers = min(
+        8,
+        mp.cpu_count()
     )
 
-    pool.close()
-    pool.join()
+    print(
+        f'Using {workers} worker processes.'
+    )
+
+    completed = 0
+
+    with mp.Pool(workers) as pool:
+
+        # imap_unordered returns results as soon as workers
+        # finish, allowing the MAIN process to write each
+        # result safely to SQLite.
+        for result in pool.imap_unordered(
+            fetch_definition,
+            words,
+            chunksize=10
+        ):
+
+            save_definition(result)
+
+            completed += 1
+
+            if completed % 100 == 0:
+
+                remaining = len(words) - completed
+
+                print(
+                    f'Processed {completed}/{len(words)} '
+                    f'words. '
+                    f'{remaining} remaining.'
+                )
+
+    print(
+        'Finished processing all remaining words.'
+    )

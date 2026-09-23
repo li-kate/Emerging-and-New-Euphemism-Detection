@@ -1,16 +1,14 @@
 """
-Filter Rules:
-  1. Filter for words with drug-related terms (from drugs.txt)
-  2. Removes terms from the database that are more than 2 words.
-  3. Removes words that are less than 4 characters.
-  4. Removes words with less than 100 upvotes.
-  5. If a drug-related definition exists before 2015, exclude that word.
+Filter Rules (in order):
+  1. Removes words with less than 50 upvotes.
+  2. Removes words that are less than 4 characters.
+  3. Removes terms from the database that are more than 1 word.
+  4. Filter for words with drug-related terms (in drug_synonyms.txt from 2018 DEA list).
+  5. Normalizes words.
 
 Drug Matching:
   - Checks definitions for terms listed in drug_synonyms.txt.
   - Saves the matching drug terms for each normalized word.
-  - If a definition containing a drug term is before 2015,
-    the ENTIRE normalized word is excluded.
 
 Additional Normalization:
   - Tries to combine words that are the same.
@@ -28,7 +26,6 @@ from datetime import datetime
 
 from nltk.stem import WordNetLemmatizer
 
-
 # FILE SETTINGS
 
 DB_PATH = "urban-dict-drugs.db"
@@ -38,13 +35,11 @@ OUTPUT_FILE = "filtered_drug_terms.json"
 # FILTER SETTINGS
 
 # Maximum number of words allowed in a term.
-MAX_WORDS = 2
+MAX_WORDS = 1
 # Minimum number of characters allowed in a term.
 MIN_TERM_LENGTH = 4
-# Remove a word entirely if its earliest definition is before this date.
-MIN_FIRST_MENTION_DATE = datetime(2015, 1, 1)
 # Only save definitions with at least this many upvotes.
-MIN_UPVOTES = 100
+MIN_UPVOTES = 50
 
 # WORD NORMALIZATION
 
@@ -253,7 +248,6 @@ excluded_words = set()
 
 processed = 0
 matched_definitions = 0
-pre_2015_matches = 0
 
 skipped_long_words = 0
 skipped_empty_words = 0
@@ -273,21 +267,19 @@ for row in cur:
         skipped_empty_words += 1
         continue
 
-    # Reject terms containing more than MAX_WORDS words
-    word_parts = re.findall(
-        r"\S+",
-        original_word.strip()
-    )
-    if len(word_parts) > MAX_WORDS:
-        skipped_long_words += 1
-        continue
+    # Get votes
+    upvotes = row["upvotes"]
+    downvotes = row["downvotes"]
 
-    # Normalize word
-    normalized_word = normalize_word(
-        original_word
-    )
-    if not normalized_word:
-        skipped_empty_words += 1
+    # Convert NULL values to zero.
+    if upvotes is None:
+        upvotes = 0
+    if downvotes is None:
+        downvotes = 0
+
+    # Filter definitions with insufficient upvotes
+    if upvotes < MIN_UPVOTES:
+        skipped_low_upvotes += 1
         continue
 
     # Reject terms that are too short
@@ -295,11 +287,20 @@ for row in cur:
         re.sub(
             r"\s+",
             "",
-            normalized_word
+            original_word.strip()
         )
     )
     if character_count < MIN_TERM_LENGTH:
         skipped_short_words += 1
+        continue
+
+    # Reject terms containing more than MAX_WORDS words
+    word_parts = re.findall(
+        r"\S+",
+        original_word.strip()
+    )
+    if len(word_parts) > MAX_WORDS:
+        skipped_long_words += 1
         continue
 
     # Get definition
@@ -318,38 +319,19 @@ for row in cur:
     if not matches:
         continue
 
+    # Normalize word
+    normalized_word = normalize_word(
+        original_word
+    )
+    if not normalized_word:
+        skipped_empty_words += 1
+        continue
+
     # Get date
     definition_date = row["date"]
     parsed_date = parse_date(
         definition_date
     )
-
-    # If a definition containing a drug term is before 2015, exclude the ENTIRE normalized word.
-    if (
-        matches
-        and parsed_date is not None
-        and parsed_date < MIN_FIRST_MENTION_DATE
-    ):
-        excluded_words.add(
-            normalized_word
-        )
-        pre_2015_matches += 1
-        continue
-
-    # Get votes
-    upvotes = row["upvotes"]
-    downvotes = row["downvotes"]
-
-    # Convert NULL values to zero.
-    if upvotes is None:
-        upvotes = 0
-    if downvotes is None:
-        downvotes = 0
-
-    # Filter definitions with insufficient upvotes
-    if upvotes < MIN_UPVOTES:
-        skipped_low_upvotes += 1
-        continue
 
     # Create word entry if necessary
     if normalized_word not in results_by_word:
@@ -473,16 +455,8 @@ print(
     f"{matched_definitions:,}"
 )
 print(
-    f"Pre-2015 drug matches:         "
-    f"{pre_2015_matches:,}"
-)
-print(
     f"Words excluded from drug match:"
     f"{len(excluded_words):,}"
-)
-print(
-    f"Skipped >2-word terms:         "
-    f"{skipped_long_words:,}"
 )
 print(
     f"Skipped empty terms:           "
