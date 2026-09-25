@@ -1,7 +1,13 @@
 """
 Per-file BERT embedding script for SLURM array jobs.
-Extracts contextual span embeddings for all words (anchors, euphemism
-candidates, established euphemisms, and comparison words).
+Extracts target-centered contextual span embeddings for all words (anchors,
+euphemism candidates, established euphemisms, and comparison words).
+
+For corpus occurrences, the script uses exact character offsets emitted by the
+collector, keeps +/- CONTEXT_TOKENS_EACH_SIDE BERT wordpieces around the target,
+and averages ONLY the target wordpiece hidden states to form the occurrence
+vector. This prevents long-comment truncation from dropping the target and
+prevents repeated target words from being confused with the first occurrence.
 
 INCREMENTAL SAVING: Checkpoints to disk every SAVE_EVERY batches.
 If the job crashes or times out, restarting picks up from the last
@@ -39,6 +45,11 @@ MODEL_NAME = "bert-base-uncased"
 BATCH_SIZE = 256
 HIDDEN_DIM = 768
 SAVE_EVERY = 20  # Save checkpoint every N batches (~5120 rows)
+
+# Context strategy: keep exactly this many BERT wordpiece tokens on each side
+# of the target occurrence. The target's own wordpieces are always retained.
+CONTEXT_TOKENS_EACH_SIDE = 64
+EMBEDDING_VERSION = "target_centered_wordpiece_window_v1"
 
 # Output paths
 OUTPUT_FILE = f"partial_results_{task_id}.json"
@@ -129,10 +140,77 @@ def get_month_slice(timestamp):
         return "unknown"
 
 
-def find_span(sentence, word):
+def find_span(text, word):
+    """Legacy fallback for old JSONL files that do not contain offsets."""
     pattern = r"\b" + re.escape(word) + r"\b"
-    match = re.search(pattern, sentence, re.IGNORECASE)
+    match = re.search(pattern, text, re.IGNORECASE)
     return (match.start(), match.end()) if match else (None, None)
+
+
+def embedding_config():
+    """Configuration that must match before a checkpoint can be resumed."""
+    return {
+        "embedding_version": EMBEDDING_VERSION,
+        "model_name": MODEL_NAME,
+        "context_tokens_each_side": CONTEXT_TOKENS_EACH_SIDE,
+        "layer_strategy": "last_hidden_state",
+        "target_pooling": "mean_target_wordpieces",
+    }
+
+
+def crop_target_context(text, char_start, char_end):
+    """
+    Create a target-centered BERT-wordpiece context window.
+
+    Returns:
+        (context_text, new_char_start, new_char_end) or None
+
+    The returned character offsets are relative to `context_text`. We tokenize
+    the full source text only to determine wordpiece boundaries; BERT itself is
+    run later on the much smaller cropped context.
+    """
+    if not (0 <= char_start < char_end <= len(text)):
+        return None
+
+    encoded = tokenizer(
+        text,
+        add_special_tokens=False,
+        return_offsets_mapping=True,
+        truncation=False,
+    )
+    offsets = encoded["offset_mapping"]
+    if not offsets:
+        return None
+
+    # A token belongs to the target if its character span overlaps the target
+    # span. Overlap is safer than requiring full containment for punctuation or
+    # unusual tokenization edge cases.
+    target_token_indices = [
+        i
+        for i, (ts, te) in enumerate(offsets)
+        if te > char_start and ts < char_end
+    ]
+    if not target_token_indices:
+        return None
+
+    first_target = target_token_indices[0]
+    last_target = target_token_indices[-1]
+
+    left_token = max(0, first_target - CONTEXT_TOKENS_EACH_SIDE)
+    right_token = min(
+        len(offsets), last_target + 1 + CONTEXT_TOKENS_EACH_SIDE
+    )
+
+    context_char_start = offsets[left_token][0]
+    context_char_end = offsets[right_token - 1][1]
+    context_text = text[context_char_start:context_char_end]
+
+    new_start = char_start - context_char_start
+    new_end = char_end - context_char_start
+    if not (0 <= new_start < new_end <= len(context_text)):
+        return None
+
+    return context_text, new_start, new_end
 
 
 # ──────────────────────────────────────────────────────────────
@@ -141,6 +219,7 @@ def find_span(sentence, word):
 def save_checkpoint(candidate_slices, corpus_anchor_sums, stats, rows_processed):
     """Save current state to disk. Atomic write via rename."""
     data = {
+        "embedding_config": embedding_config(),
         "rows_processed": rows_processed,
         "stats": stats,
         "corpus_anchor_sums": {
@@ -174,6 +253,13 @@ def load_checkpoint():
         with open(CHECKPOINT_FILE, "r") as f:
             data = json.load(f)
 
+        if data.get("embedding_config") != embedding_config():
+            print(
+                "  [WARN] Checkpoint was created with a different embedding "
+                "configuration; starting fresh to avoid mixing incompatible vectors."
+            )
+            return None
+
         # Rebuild candidate_slices
         candidate_slices = defaultdict(
             lambda: defaultdict(
@@ -200,6 +286,9 @@ def load_checkpoint():
 
         rows_processed = data["rows_processed"]
         stats = data["stats"]
+        stats.setdefault("skipped_invalid_offsets", 0)
+        stats.setdefault("skipped_context_build", 0)
+        stats.setdefault("legacy_span_fallback", 0)
         print(f"  Resuming from row {rows_processed}")
         print(
             f"  Stats so far: embedded={stats['embedded']}, skipped={stats['skipped_no_tokens']}"
@@ -220,9 +309,10 @@ model = AutoModel.from_pretrained(MODEL_NAME).to(device)
 model.eval()
 
 
-def extract_span_embedding(sentence, char_start, char_end):
+def extract_span_embedding(text, char_start, char_end):
+    """Embed one target span; used for the short anchor templates."""
     inputs = tokenizer(
-        sentence,
+        text,
         return_offsets_mapping=True,
         return_tensors="pt",
         truncation=True,
@@ -240,7 +330,7 @@ def extract_span_embedding(sentence, char_start, char_end):
         ts, te = ts.item(), te.item()
         if ts == 0 and te == 0:
             continue
-        if ts >= char_start and te <= char_end:
+        if te > char_start and ts < char_end:
             token_indices.append(j)
 
     if not token_indices:
@@ -249,10 +339,14 @@ def extract_span_embedding(sentence, char_start, char_end):
 
 
 def get_batch_span_embeddings(batch_data):
-    sentences = [d["sentence"] for d in batch_data]
+    """
+    Run BERT on already-cropped target-centered contexts and return one vector
+    per target occurrence by averaging only the target's BERT wordpieces.
+    """
+    texts = [d["text"] for d in batch_data]
 
     inputs = tokenizer(
-        sentences,
+        texts,
         return_offsets_mapping=True,
         return_tensors="pt",
         padding=True,
@@ -277,7 +371,7 @@ def get_batch_span_embeddings(batch_data):
             ts, te = ts.item(), te.item()
             if ts == 0 and te == 0:
                 continue
-            if ts >= char_start and te <= char_end:
+            if te > char_start and ts < char_end:
                 token_indices.append(j)
 
         if not token_indices:
@@ -352,7 +446,10 @@ else:
         "span_found": 0,
         "embedded": 0,
         "skipped_no_span": 0,
+        "skipped_invalid_offsets": 0,
+        "skipped_context_build": 0,
         "skipped_no_tokens": 0,
+        "legacy_span_fallback": 0,
     }
     rows_to_skip = 0
 
@@ -406,24 +503,53 @@ with open(target_file, "r") as f:
         stats["rows_read"] += 1
 
         row = json.loads(line)
-        sentence = row.get("sentence", "")
+        # New collector uses `text`; `sentence` is accepted only so older files
+        # can still be read. Older files do not identify repeated occurrences
+        # reliably, so fresh schema-v2 collection is preferred for final runs.
+        text = row.get("text") or row.get("sentence", "")
         candidate = row.get("word", "")
         timestamp = row.get("timestamp", "")
 
-        if not sentence or not candidate:
+        if not text or not candidate:
             continue
 
-        start, end = find_span(sentence, candidate)
-        if start is None:
-            stats["skipped_no_span"] += 1
-            continue
+        if "match_start" in row and "match_end" in row:
+            try:
+                start = int(row["match_start"])
+                end = int(row["match_end"])
+            except (TypeError, ValueError):
+                stats["skipped_invalid_offsets"] += 1
+                continue
+
+            # Do not silently fall back when schema-v2 offsets are malformed;
+            # that could embed the wrong occurrence in a repeated-word comment.
+            if not (0 <= start < end <= len(text)):
+                stats["skipped_invalid_offsets"] += 1
+                continue
+            if text[start:end].casefold() != candidate.casefold():
+                stats["skipped_invalid_offsets"] += 1
+                continue
+        else:
+            # Backward compatibility only. re.search returns the first
+            # occurrence, so this is not occurrence-safe for repeated targets.
+            start, end = find_span(text, candidate)
+            if start is None:
+                stats["skipped_no_span"] += 1
+                continue
+            stats["legacy_span_fallback"] += 1
 
         stats["span_found"] += 1
 
+        cropped = crop_target_context(text, start, end)
+        if cropped is None:
+            stats["skipped_context_build"] += 1
+            continue
+
+        context_text, context_start, context_end = cropped
         batch_queue.append(
             {
-                "sentence": sentence,
-                "span": (start, end),
+                "text": context_text,
+                "span": (context_start, context_end),
                 "candidate": candidate,
                 "timestamp": timestamp,
             }
@@ -455,13 +581,17 @@ print(f"  Rows read:             {stats['rows_read']}")
 print(f"  Spans found:           {stats['span_found']}")
 print(f"  Successfully embedded: {stats['embedded']}")
 print(f"  Skipped (no span):     {stats['skipped_no_span']}")
+print(f"  Skipped (bad offsets): {stats['skipped_invalid_offsets']}")
+print(f"  Skipped (context):     {stats['skipped_context_build']}")
 print(f"  Skipped (no tokens):   {stats['skipped_no_tokens']}")
+print(f"  Legacy span fallback:  {stats['legacy_span_fallback']}")
 
 
 # ──────────────────────────────────────────────────────────────
 # SAVE FINAL RESULTS
 # ──────────────────────────────────────────────────────────────
 output = {
+    "embedding_config": embedding_config(),
     "data": {},
     "anchor_template_embeddings": {
         k: v.tolist() for k, v in anchor_template_embeddings.items()

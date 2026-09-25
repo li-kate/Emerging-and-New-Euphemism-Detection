@@ -1,3 +1,11 @@
+"""
+Collect exact target-word occurrences from Reddit dumps.
+
+This stage preserves full cleaned source text and exact character offsets for
+EVERY matched occurrence. It deliberately does not choose an embedding context
+window; that is done downstream so context-window ablations use identical data.
+"""
+
 import argparse
 import glob
 import io
@@ -308,20 +316,28 @@ def collect_instances(
     context_sentences: int = 2,
 ):
     """
-    Stream through text records, find all matches, save to JSONL.
+    Stream through text records, find every target occurrence, and save JSONL.
+
+    IMPORTANT: this collection stage intentionally preserves the FULL cleaned
+    Reddit comment/post. Context selection belongs in the embedding stage so
+    that different context-window strategies can be compared on the exact same
+    occurrences without rescanning the raw Reddit dumps.
 
     Each output record contains:
-        - word: the matched word
-        - category: from the word list (e.g., "cocaine", "comparison")
-        - sentence: the sentence containing the match
-        - timestamp: from the source
-        - subreddit: if from Reddit
-        - source: data source identifier
+        - schema_version: output schema version (2)
+        - word: canonical matched target from the word list
+        - category: source word-list category
+        - text: full cleaned Reddit comment/post
+        - match_start: exact character offset of this occurrence in `text`
+        - match_end: exclusive character offset of this occurrence in `text`
+        - match_text: exact surface form from the Reddit text (sanity check)
+        - timestamp: source timestamp
+        - subreddit: subreddit, if available
+        - permalink: Reddit permalink, if available
+        - source: source identifier
 
-    NOTE: `context_sentences` is currently accepted but not applied —
-    the full comment/post text is always written to `sentence` as-is,
-    with no sentence-level windowing. See discussion for a proposed
-    implementation if tighter context windows are needed.
+    `context_sentences` is retained only for CLI/backward compatibility and is
+    intentionally ignored. The embedding script chooses the context window.
     """
     
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -354,9 +370,13 @@ def collect_instances(
                     match_counts[word] = match_counts.get(word, 0) + 1
 
                     output_record = {
+                        "schema_version": 2,
                         "word": word,
                         "category": match["category"],
-                        "sentence": text,
+                        "text": text,
+                        "match_start": match["start"],
+                        "match_end": match["end"],
+                        "match_text": text[match["start"]:match["end"]],
                         "timestamp": record["timestamp"],
                         "subreddit": record.get("subreddit", ""),
                         "permalink": record.get("permalink", ""),
@@ -392,6 +412,7 @@ def collect_instances(
         with open(stats_path, "w") as f:
             json.dump(
                 {
+                    "schema_version": 2,
                     "total_records": total_records,
                     "total_matches": total_matches,
                     "unique_words_matched": len(match_counts),
@@ -531,7 +552,10 @@ def main():
         "--context-sentences",
         type=int,
         default=2,
-        help="Number of surrounding sentences to include",
+        help=(
+            "Deprecated/ignored. Full text plus exact target offsets are saved; "
+            "context is selected later by the embedding script."
+        ),
     )
 
     # Output
