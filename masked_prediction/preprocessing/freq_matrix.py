@@ -21,18 +21,32 @@ See ``filter.md`` for the full plan. This script:
   * saves ``freq.npy`` plus label files, the stop-word list, per-half-year
     totals, and ``freq_meta.json``.
 
-Example:
+It supports two modes:
+
+  * ``--mode build`` (default): the full single-process pipeline above —
+    count the whole corpus, postfilter, and write the final outputs.
+  * ``--mode map``: count only this task's slice of the input files
+    (selected by ``--shard-index`` / ``--num-shards``, so a SLURM job array
+    can parallelize) and write a partial-count shard. ``merge_freq_matrix.py``
+    then reduces all shards into the final matrix. No postfilter happens in
+    map mode — the postfilter is global and must run once, after merging.
+
+Example (single process):
 
     python freq_matrix.py \\
         --reddit-monthly-dir /data/reddit \\
         --out-dir freq_all \\
         --dtype int32
 
+Example (one SLURM array task of N):
+
     python freq_matrix.py \\
-        --input corpus.jsonl \\
+        --mode map \\
+        --reddit-monthly-dir /data/reddit \\
         --subreddit-file subreddits.txt \\
-        --out-dir freq_subreddits \\
-        --dtype int64
+        --shard-dir freq_subreddits/shards \\
+        --shard-index $SLURM_ARRAY_TASK_ID \\
+        --num-shards 40
 """
 
 import argparse
@@ -403,6 +417,76 @@ def save_outputs(
 
 
 # ============================================================================
+# SHARDS (map/reduce)
+# ============================================================================
+
+# Shards are plain JSON so merge_freq_matrix.py can sum them without needing
+# this module's dtype or matrix code. One file per array task.
+SHARD_SUFFIX = ".part.json"
+
+
+def write_shard(
+    shard_dir,
+    shard_index,
+    counts,
+    totals_raw,
+    prefilter_counts,
+    half_years,
+    drop_counts,
+    files,
+):
+    """
+    Write one map task's partial counts to ``<shard_dir>/NNNNN.part.json``.
+
+    Written atomically (temp file then rename) so a crashed task never leaves
+    a half-written shard that the merge step would silently read.
+    """
+    os.makedirs(shard_dir, exist_ok=True)
+    name = f"{shard_index:05d}{SHARD_SUFFIX}"
+    final_path = os.path.join(shard_dir, name)
+    tmp_path = final_path + ".tmp"
+
+    payload = {
+        "shard_index": shard_index,
+        # defaultdicts -> plain dicts for JSON.
+        "counts": {w: dict(hy) for w, hy in counts.items()},
+        "totals_raw": dict(totals_raw),
+        "prefilter_counts": dict(prefilter_counts),
+        "half_years": sorted(half_years),
+        "drop_counts": dict(drop_counts),
+        "files": list(files),
+    }
+
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+    os.replace(tmp_path, final_path)
+
+    logger.info(
+        "Wrote shard %s (%s terms, %s files)",
+        final_path,
+        f"{len(counts):,}",
+        len(files),
+    )
+    return final_path
+
+
+def slice_for_shard(paths, shard_index, num_shards):
+    """
+    Return this shard's slice of ``paths`` using a round-robin stride.
+
+    Round-robin (``paths[i::num_shards]``) spreads large and small dump files
+    across tasks more evenly than contiguous chunks would, since Reddit dumps
+    grow a lot over the years.
+    """
+    if not 0 <= shard_index < num_shards:
+        raise ValueError(
+            f"shard_index {shard_index} out of range for num_shards "
+            f"{num_shards}"
+        )
+    return paths[shard_index::num_shards]
+
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
@@ -452,6 +536,38 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
+    # --- Mode ---
+    parser.add_argument(
+        "--mode",
+        choices=["build", "map"],
+        default="build",
+        help="build: full single-process pipeline (count + postfilter + save). "
+        "map: count only this task's file slice and write a shard for "
+        "merge_freq_matrix.py.",
+    )
+
+    # --- Map/shard options (only used with --mode map) ---
+    shard = parser.add_argument_group("map/shard (with --mode map)")
+    shard.add_argument(
+        "--shard-dir",
+        help="Directory to write this task's shard into (and that the merge "
+        "step reads from).",
+    )
+    shard.add_argument(
+        "--shard-index",
+        type=int,
+        default=None,
+        help="This task's index in [0, num_shards). Defaults to "
+        "$SLURM_ARRAY_TASK_ID if set.",
+    )
+    shard.add_argument(
+        "--num-shards",
+        type=int,
+        default=None,
+        help="Total number of shards/array tasks. Defaults to "
+        "$SLURM_ARRAY_TASK_COUNT if set.",
+    )
+
     # --- Inputs (pick one or more) ---
     src = parser.add_argument_group("inputs")
     src.add_argument(
@@ -493,9 +609,9 @@ def main():
     out = parser.add_argument_group("outputs")
     out.add_argument(
         "--out-dir",
-        required=True,
+        default=None,
         help="Output directory (tag by scope, e.g. freq_all/ or "
-        "freq_subreddits/).",
+        "freq_subreddits/). Required for --mode build.",
     )
     out.add_argument(
         "--stem",
@@ -518,15 +634,45 @@ def main():
 
     args = parser.parse_args()
 
-    paths = resolve_inputs(args)
-    if not paths:
+    # Resolve SLURM array env defaults for the shard options.
+    if args.shard_index is None and os.environ.get("SLURM_ARRAY_TASK_ID"):
+        args.shard_index = int(os.environ["SLURM_ARRAY_TASK_ID"])
+    if args.num_shards is None and os.environ.get("SLURM_ARRAY_TASK_COUNT"):
+        args.num_shards = int(os.environ["SLURM_ARRAY_TASK_COUNT"])
+
+    # Per-mode argument validation.
+    if args.mode == "build" and not args.out_dir:
+        parser.error("--out-dir is required for --mode build.")
+    if args.mode == "map":
+        if not args.shard_dir:
+            parser.error("--shard-dir is required for --mode map.")
+        if args.shard_index is None or args.num_shards is None:
+            parser.error(
+                "--shard-index and --num-shards are required for --mode map "
+                "(or set SLURM_ARRAY_TASK_ID / SLURM_ARRAY_TASK_COUNT)."
+            )
+
+    all_paths = resolve_inputs(args)
+    if not all_paths:
         parser.error(
             "Provide at least one input: --input, --input-dir, or "
             "--reddit-monthly-dir."
         )
-    logger.info("Resolved %d input file(s)", len(paths))
 
-    dtype = np.int32 if args.dtype == "int32" else np.int64
+    # In map mode, process only this shard's slice of the files.
+    if args.mode == "map":
+        paths = slice_for_shard(all_paths, args.shard_index, args.num_shards)
+        logger.info(
+            "Map shard %d/%d: %d of %d input file(s)",
+            args.shard_index,
+            args.num_shards,
+            len(paths),
+            len(all_paths),
+        )
+    else:
+        paths = all_paths
+        logger.info("Resolved %d input file(s)", len(paths))
+
     names = build_output_names(args.stem)
 
     # Scope.
@@ -538,6 +684,21 @@ def main():
         logger.info("Scope: all of Reddit")
 
     drop_counts = defaultdict(int)
+
+    # An empty slice (num_shards > num_files) still writes a valid empty shard
+    # so the merge step's shard count stays predictable.
+    if args.mode == "map" and not paths:
+        logger.info("Shard %d has no files assigned; writing empty shard.",
+                    args.shard_index)
+        write_shard(
+            args.shard_dir, args.shard_index,
+            counts={}, totals_raw={},
+            prefilter_counts={"short_terms": 0, "multi_word_terms": 0,
+                              "stop_words": 0},
+            half_years=set(), drop_counts=drop_counts, files=[],
+        )
+        return
+
     stream = stream_corpus(
         paths, args.start_year, args.end_year, allowed, drop_counts
     )
@@ -548,15 +709,6 @@ def main():
         stream, term_cache
     )
 
-    if not counts:
-        logger.error("No terms survived counting. Check inputs and filters.")
-        sys.exit(1)
-
-    # Log scope + prefilter.
-    n_kept_terms = len(counts)
-    n_prefiltered = sum(prefilter_counts.values())
-    log_prefilter_counts(prefilter_counts, n_kept_terms + n_prefiltered)
-
     logger.info(
         "Scope drops — subreddit:%s empty:%s year:%s bad_ts:%s parse:%s",
         f"{drop_counts['subreddit']:,}",
@@ -565,6 +717,32 @@ def main():
         f"{drop_counts['bad_timestamp']:,}",
         f"{drop_counts['parse_error']:,}",
     )
+
+    # --- Map mode: write the shard and stop (no postfilter, no final save) ---
+    if args.mode == "map":
+        write_shard(
+            args.shard_dir,
+            args.shard_index,
+            counts,
+            totals_raw,
+            prefilter_counts,
+            half_years,
+            drop_counts,
+            paths,
+        )
+        logger.info("Map shard %d done.", args.shard_index)
+        return
+
+    if not counts:
+        logger.error("No terms survived counting. Check inputs and filters.")
+        sys.exit(1)
+
+    # Log prefilter.
+    n_kept_terms = len(counts)
+    n_prefiltered = sum(prefilter_counts.values())
+    log_prefilter_counts(prefilter_counts, n_kept_terms + n_prefiltered)
+
+    dtype = np.int32 if args.dtype == "int32" else np.int64
 
     # Assemble + postfilter.
     freq, half_years, words = assemble_matrix(counts, half_years, dtype)
