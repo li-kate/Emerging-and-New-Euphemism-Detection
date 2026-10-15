@@ -2,20 +2,25 @@
 set -euo pipefail
 
 # ============================================================================
-# Hit-matrix pipeline: pilot selection -> map (SLURM array) -> merge (reduce).
+# Hit-matrix pipeline: pilot (SLURM job) -> map (SLURM array) -> merge (reduce).
 #
 #   0. Pilot: pilot_creation.py selects the control words (pilot_words.json)
-#      from the frequency matrix + DEA list. Runs once, up front, because every
-#      map task reads it. CPU-only and quick, so it runs on the submit node
-#      here; move it into its own job if your login node forbids compute.
+#      from the frequency matrix + DEA list. Runs as its OWN SLURM job (not on
+#      the submit node) so numpy/pandas are installed in the job environment —
+#      the submit node may not have them. Every map task reads its output, so
+#      the map array waits for it via afterok.
 #   1. Map array: ONE TASK PER MONTH. Each task scores a single month with BERT
-#      (hit_matrix.py --mode map) and writes one shard. GPU per task.
+#      (hit_matrix.py --mode map) and writes one shard. GPU per task. Starts
+#      after the pilot job succeeds (afterok).
 #   2. Merge: after all map tasks succeed (afterok), merge_hit_matrix.py sums
 #      the shards into the summary table + matrices aligned to the frequency
 #      matrix.
 #
+# Nothing in this pipeline runs Python on the submit node; the only submit-node
+# work is globbing dump filenames to size the array (no Python needed).
+#
 # Mirrors submit_freq_matrix_pipeline.sh (same month grouping and array sizing);
-# the differences are the pilot pre-step and the GPU request on the map array.
+# the differences are the pilot pre-job and the GPU request on the map array.
 #
 # PREREQUISITE: the frequency matrix must already be built (freq_dir below),
 # since it defines the target words + denominator and its scope hash is checked.
@@ -62,17 +67,36 @@ if [[ ! -f "${FREQ_DIR}/${FREQ_STEM}_words.csv" || ! -f "${FREQ_DIR}/${FREQ_STEM
     exit 1
 fi
 
-# --- Step 0: pilot selection (runs once, up front) ---------------------------
-echo "Selecting pilot words -> ${PILOT_FILE}"
-python -u pilot_creation.py \
-    --freq-dir "$FREQ_DIR" \
-    --stem "$FREQ_STEM" \
-    --dea-file "$DEA_FILE" \
-    --out "$PILOT_FILE" \
-    --seed "$PILOT_SEED" \
-    --min-freq "$PILOT_MIN_FREQ" \
-    --min-periods "$PILOT_MIN_PERIODS" \
-    --n-pilot "$PILOT_N"
+# --- Step 0: pilot selection (its own SLURM job) -----------------------------
+# Runs on a compute node so numpy/pandas get installed in the job env. The map
+# array depends on this via afterok, so pilot_words.json always exists before
+# any month task reads it. CPU-only; no GPU requested.
+PILOT_JOB=$(sbatch --parsable \
+    --job-name=hit_pilot \
+    --nodes=1 \
+    --ntasks=1 \
+    --cpus-per-task=1 \
+    --mem=16G \
+    --time=0:30:00 \
+    --output="logs_hit_matrix/pilot_%j.out" \
+    --mail-type=FAIL \
+    --wrap="
+        set -euo pipefail
+        module load anaconda3
+        source \"\$(conda info --base)/etc/profile.d/conda.sh\"
+        conda activate base
+        pip install numpy pandas
+        python -u pilot_creation.py \
+            --freq-dir '$FREQ_DIR' \
+            --stem '$FREQ_STEM' \
+            --dea-file '$DEA_FILE' \
+            --out '$PILOT_FILE' \
+            --seed $PILOT_SEED \
+            --min-freq $PILOT_MIN_FREQ \
+            --min-periods $PILOT_MIN_PERIODS \
+            --n-pilot $PILOT_N
+    ")
+echo "Submitted pilot job: $PILOT_JOB -> $PILOT_FILE"
 
 # --- Count distinct months (array size) --------------------------------------
 shopt -s nullglob
@@ -110,6 +134,7 @@ else
 fi
 
 MAP_JOB=$(sbatch --parsable \
+    --dependency="afterok:${PILOT_JOB}" \
     --job-name=hit_map \
     --nodes=1 \
     --ntasks-per-node=1 \
@@ -141,6 +166,7 @@ MAP_JOB=$(sbatch --parsable \
             --fp16
     ")
 echo "Submitted map array: $MAP_JOB ($ARRAY_SPEC) — one GPU task per month"
+echo "The map array will start after the pilot job succeeds (afterok)."
 
 # --- Merge (reduce), after all map tasks succeed -----------------------------
 MERGE_JOB=$(sbatch --parsable \
@@ -169,3 +195,5 @@ MERGE_JOB=$(sbatch --parsable \
     ")
 echo "Submitted merge job: $MERGE_JOB"
 echo "The merge will start after all map tasks succeed (afterok)."
+echo ""
+echo "Chain: pilot ($PILOT_JOB) -> map ($MAP_JOB) -> merge ($MERGE_JOB)"
