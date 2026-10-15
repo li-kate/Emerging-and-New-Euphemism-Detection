@@ -35,11 +35,12 @@ if [[ "$NUM_PERIODS" -eq 0 ]]; then
 fi
 
 echo "Found $NUM_PERIODS half-year periods."
-echo "Submitting cosine similarity array: 0-$((NUM_PERIODS - 1))"
+# echo "Submitting cosine similarity array: 0-$((NUM_PERIODS - 1))"
+echo "Submitting cosine similarity array: 0-1"
 
 # Submit one task per half-year.
 COSINE_JOB=$(sbatch --parsable \
-    --array="0-$((NUM_PERIODS - 1))" \
+    --array="0-1" \
     submit_cs.sbatch)
 
 echo "Submitted cosine similarity array: $COSINE_JOB"

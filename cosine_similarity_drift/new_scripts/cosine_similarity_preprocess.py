@@ -61,6 +61,9 @@ TASK_ID = int(os.environ.get("SLURM_ARRAY_TASK_ID", "0"))
 URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 WHITESPACE_RE = re.compile(r"\s+")
 
+# delete this when actually running
+TEST_MONTHS = {"2015-01", "2015-02"}
+
 
 # ---------------------------------------------------------------------
 # INPUT HELPERS
@@ -311,13 +314,30 @@ def process_half_year(
             if timestamp is None:
                 continue
 
+            # delete when actually running
             try:
+                dt = datetime.fromtimestamp(
+                    float(timestamp), tz=timezone.utc
+                )
                 period = half_year_from_timestamp(timestamp)
             except (TypeError, ValueError, OverflowError):
                 continue
 
+            # TEMPORARY TEST: only process January and February 2024.
+            month = dt.strftime("%Y-%m")
+            if month not in TEST_MONTHS:
+                continue
+
             if period != target_half_year:
                 continue
+
+            # try:
+            #     period = half_year_from_timestamp(timestamp)
+            # except (TypeError, ValueError, OverflowError):
+            #     continue
+
+            # if period != target_half_year:
+            #     continue
 
             text = clean_record_text(record)
             if not text:
