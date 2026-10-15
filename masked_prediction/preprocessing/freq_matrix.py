@@ -434,20 +434,28 @@ def write_shard(
     half_years,
     drop_counts,
     files,
+    shard_name=None,
 ):
     """
-    Write one map task's partial counts to ``<shard_dir>/NNNNN.part.json``.
+    Write one map task's partial counts to ``<shard_dir>/<name>.part.json``.
+
+    The shard is named ``shard_name`` if given (e.g. a month key like
+    ``RC_2018-07``), otherwise ``NNNNN`` from ``shard_index``. Either way the
+    merge step globs ``*.part.json``, so the name only has to be unique per
+    task.
 
     Written atomically (temp file then rename) so a crashed task never leaves
     a half-written shard that the merge step would silently read.
     """
     os.makedirs(shard_dir, exist_ok=True)
-    name = f"{shard_index:05d}{SHARD_SUFFIX}"
+    stem = shard_name if shard_name is not None else f"{shard_index:05d}"
+    name = f"{stem}{SHARD_SUFFIX}"
     final_path = os.path.join(shard_dir, name)
     tmp_path = final_path + ".tmp"
 
     payload = {
         "shard_index": shard_index,
+        "shard_name": shard_name,
         # defaultdicts -> plain dicts for JSON.
         "counts": {w: dict(hy) for w, hy in counts.items()},
         "totals_raw": dict(totals_raw),
@@ -484,6 +492,30 @@ def slice_for_shard(paths, shard_index, num_shards):
             f"{num_shards}"
         )
     return paths[shard_index::num_shards]
+
+
+def group_by_month(paths):
+    """
+    Group dump files by month into ``{month_key: [files]}``, sorted by key.
+
+    A month key is the ``RC_YYYY-MM`` / ``RS_YYYY-MM`` stem; any multi-part
+    pieces (e.g. ``RC_2018-07_part000.zst``) are grouped under the same key.
+    This mirrors the month grouping in collect_instances.py so one array task
+    maps to exactly one month of the corpus.
+
+    Non-dump inputs (plain .jsonl, or names that do not start with a
+    ``PREFIX_YYYY-MM`` pattern) are each given their own group keyed by their
+    stem, so --input files still work one-task-per-file.
+    """
+    month_re = re.compile(r"^(R[CS]_\d{4}-\d{2})")
+    groups = defaultdict(list)
+    for path in paths:
+        stem = Path(path).stem  # e.g. "RC_2018-07_part000" or "corpus"
+        m = month_re.match(stem)
+        key = m.group(1) if m else stem
+        groups[key].append(path)
+    # Sort file lists within each month for deterministic order.
+    return {k: sorted(groups[k]) for k in sorted(groups)}
 
 
 # ============================================================================
@@ -549,6 +581,14 @@ def main():
     # --- Map/shard options (only used with --mode map) ---
     shard = parser.add_argument_group("map/shard (with --mode map)")
     shard.add_argument(
+        "--split",
+        choices=["month", "round-robin"],
+        default="month",
+        help="How map tasks divide the corpus. month: one task per month "
+        "(RC_/RS_ YYYY-MM, parts grouped); the array index selects a month. "
+        "round-robin: one task per --num-shards stride over all files.",
+    )
+    shard.add_argument(
         "--shard-dir",
         help="Directory to write this task's shard into (and that the merge "
         "step reads from).",
@@ -557,15 +597,16 @@ def main():
         "--shard-index",
         type=int,
         default=None,
-        help="This task's index in [0, num_shards). Defaults to "
-        "$SLURM_ARRAY_TASK_ID if set.",
+        help="This task's array index. In month split it selects the Nth "
+        "month; in round-robin it is the stride offset in [0, num_shards). "
+        "Defaults to $SLURM_ARRAY_TASK_ID if set.",
     )
     shard.add_argument(
         "--num-shards",
         type=int,
         default=None,
-        help="Total number of shards/array tasks. Defaults to "
-        "$SLURM_ARRAY_TASK_COUNT if set.",
+        help="round-robin split only: total number of stride tasks. Defaults "
+        "to $SLURM_ARRAY_TASK_COUNT if set. Ignored for month split.",
     )
 
     # --- Inputs (pick one or more) ---
@@ -646,10 +687,15 @@ def main():
     if args.mode == "map":
         if not args.shard_dir:
             parser.error("--shard-dir is required for --mode map.")
-        if args.shard_index is None or args.num_shards is None:
+        if args.shard_index is None:
             parser.error(
-                "--shard-index and --num-shards are required for --mode map "
-                "(or set SLURM_ARRAY_TASK_ID / SLURM_ARRAY_TASK_COUNT)."
+                "--shard-index is required for --mode map "
+                "(or set SLURM_ARRAY_TASK_ID)."
+            )
+        if args.split == "round-robin" and args.num_shards is None:
+            parser.error(
+                "--num-shards is required for --mode map --split round-robin "
+                "(or set SLURM_ARRAY_TASK_COUNT)."
             )
 
     all_paths = resolve_inputs(args)
@@ -659,8 +705,24 @@ def main():
             "--reddit-monthly-dir."
         )
 
-    # In map mode, process only this shard's slice of the files.
-    if args.mode == "map":
+    # In map mode, process only this task's slice of the files.
+    shard_name = None
+    if args.mode == "map" and args.split == "month":
+        months = group_by_month(all_paths)
+        month_keys = list(months)
+        if args.shard_index >= len(month_keys):
+            logger.info(
+                "Task %d >= %d months; nothing to do.",
+                args.shard_index, len(month_keys),
+            )
+            return
+        shard_name = month_keys[args.shard_index]
+        paths = months[shard_name]
+        logger.info(
+            "Map month task %d/%d: %s (%d file(s))",
+            args.shard_index, len(month_keys), shard_name, len(paths),
+        )
+    elif args.mode == "map":
         paths = slice_for_shard(all_paths, args.shard_index, args.num_shards)
         logger.info(
             "Map shard %d/%d: %d of %d input file(s)",
@@ -685,8 +747,10 @@ def main():
 
     drop_counts = defaultdict(int)
 
-    # An empty slice (num_shards > num_files) still writes a valid empty shard
-    # so the merge step's shard count stays predictable.
+    # A round-robin shard can get an empty slice (num_shards > num_files); it
+    # still writes a valid empty shard so the merge step's count is
+    # predictable. (Month split returns earlier when the index is out of
+    # range, and a real month always has at least one file.)
     if args.mode == "map" and not paths:
         logger.info("Shard %d has no files assigned; writing empty shard.",
                     args.shard_index)
@@ -696,6 +760,7 @@ def main():
             prefilter_counts={"short_terms": 0, "multi_word_terms": 0,
                               "stop_words": 0},
             half_years=set(), drop_counts=drop_counts, files=[],
+            shard_name=shard_name,
         )
         return
 
@@ -729,8 +794,10 @@ def main():
             half_years,
             drop_counts,
             paths,
+            shard_name=shard_name,
         )
-        logger.info("Map shard %d done.", args.shard_index)
+        logger.info("Map task %d done (%s).", args.shard_index,
+                    shard_name or f"shard {args.shard_index}")
         return
 
     if not counts:

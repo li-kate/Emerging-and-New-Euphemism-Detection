@@ -4,13 +4,15 @@ set -euo pipefail
 # ============================================================================
 # Parallel frequency-matrix pipeline: map (SLURM array) + merge (reduce).
 #
-#   1. Map array: each task counts its round-robin slice of the Reddit dump
-#      files (freq_matrix.py --mode map) and writes one shard.
+#   1. Map array: ONE TASK PER MONTH. Each task counts a single month of the
+#      Reddit dumps (RC_/RS_ YYYY-MM, multi-part pieces grouped) via
+#      freq_matrix.py --mode map --split month, and writes one shard.
 #   2. Merge: after all map tasks succeed (afterok), merge_freq_matrix.py sums
 #      the shards, applies the postfilter, and writes the final matrix.
 #
-# Modeled on submit_drug_centroid_pipeline.sh. Counting is CPU-only, so no GPU
-# is requested.
+# The array is sized to the number of months, so submitting once runs all
+# months in parallel. Modeled on submit_drug_centroid_pipeline.sh. Counting is
+# CPU-only, so no GPU is requested.
 #
 # to run:
 #   chmod +x submit_freq_matrix_pipeline.sh
@@ -28,38 +30,50 @@ SHARD_DIR="${OUT_DIR}/shards"
 STEM="freq"
 DTYPE="int32"
 
-# Number of map array tasks. Each task handles multiple dump files via a
-# round-robin stride, so this does NOT need to equal the file count. Override
-# from the environment, e.g.  NUM_SHARDS=20 ./submit_freq_matrix_pipeline.sh
-NUM_SHARDS="${NUM_SHARDS:-40}"
+# Optional cap on how many array tasks run at once (not how many months). This
+# is the SLURM array throttle "%N". Empty means no throttle. Override with e.g.
+#   MAX_CONCURRENT=20 ./submit_freq_matrix_pipeline.sh
+MAX_CONCURRENT="${MAX_CONCURRENT:-}"
 
-# --- Count dump files --------------------------------------------------------
+# --- Count distinct months ---------------------------------------------------
+# Group dump files by RC_/RS_ YYYY-MM prefix (parts share a month), matching
+# group_by_month() in freq_matrix.py. NUM_MONTHS == number of array tasks.
 shopt -s nullglob
 dumps=("$DUMP_DIR"/RC_*.zst "$DUMP_DIR"/RS_*.zst)
 shopt -u nullglob
-NUM_FILES=${#dumps[@]}
 
-if [[ "$NUM_FILES" -eq 0 ]]; then
+if [[ ${#dumps[@]} -eq 0 ]]; then
     echo "ERROR: No RC_*.zst or RS_*.zst files found in $DUMP_DIR"
     exit 1
 fi
 
-# Never launch more tasks than files (extra tasks would get empty slices).
-if [[ "$NUM_SHARDS" -gt "$NUM_FILES" ]]; then
-    echo "NUM_SHARDS ($NUM_SHARDS) > files ($NUM_FILES); clamping to $NUM_FILES."
-    NUM_SHARDS="$NUM_FILES"
-fi
+# Extract the "RC_YYYY-MM" / "RS_YYYY-MM" prefix from each basename, dedupe.
+months=()
+while IFS= read -r mkey; do
+    months+=("$mkey")
+done < <(
+    for f in "${dumps[@]}"; do
+        base=$(basename "$f")
+        # RC_2018-07_part000.zst -> RC_2018-07
+        echo "${base:0:10}"
+    done | sort -u
+)
 
-echo "Found $NUM_FILES Reddit dump files; using $NUM_SHARDS map tasks."
+NUM_MONTHS=${#months[@]}
+echo "Found ${#dumps[@]} dump files across $NUM_MONTHS month(s)."
+echo "First/last month: ${months[0]} ... ${months[$((NUM_MONTHS - 1))]}"
 
-# Start the shard directory clean so a rerun never merges stale shards from a
-# previous attempt.
+# --- Clean stale shards ------------------------------------------------------
+# Start fresh so a rerun never merges stale shards from a previous attempt.
 mkdir -p "$SHARD_DIR"
 rm -f "$SHARD_DIR"/*.part.json "$SHARD_DIR"/*.part.json.tmp 2>/dev/null || true
 
-# --- Map array ---------------------------------------------------------------
-# --num-shards is passed explicitly (do not rely on SLURM_ARRAY_TASK_COUNT),
-# and --shard-index comes from SLURM_ARRAY_TASK_ID inside the task.
+# --- Map array: one task per month -------------------------------------------
+ARRAY_SPEC="0-$((NUM_MONTHS - 1))"
+if [[ -n "$MAX_CONCURRENT" ]]; then
+    ARRAY_SPEC="${ARRAY_SPEC}%${MAX_CONCURRENT}"
+fi
+
 MAP_JOB=$(sbatch --parsable \
     --job-name=freq_map \
     --nodes=1 \
@@ -67,7 +81,7 @@ MAP_JOB=$(sbatch --parsable \
     --cpus-per-task=4 \
     --mem=32G \
     --time=6:00:00 \
-    --array="0-$((NUM_SHARDS - 1))" \
+    --array="$ARRAY_SPEC" \
     --output="logs_freq_matrix/map_%A_%a.out" \
     --mail-type=FAIL \
     --wrap="
@@ -79,14 +93,14 @@ MAP_JOB=$(sbatch --parsable \
         python -u -c 'import nltk; nltk.download(\"stopwords\")'
         python -u freq_matrix.py \
             --mode map \
+            --split month \
             --reddit-monthly-dir '$DUMP_DIR' \
             --subreddit-file '$SUBREDDIT_FILE' \
             --shard-dir '$SHARD_DIR' \
-            --shard-index \"\$SLURM_ARRAY_TASK_ID\" \
-            --num-shards $NUM_SHARDS
+            --shard-index \"\$SLURM_ARRAY_TASK_ID\"
     ")
 
-echo "Submitted map array: $MAP_JOB (0-$((NUM_SHARDS - 1)))"
+echo "Submitted map array: $MAP_JOB ($ARRAY_SPEC) — one task per month"
 
 # --- Merge (reduce), after all map tasks succeed -----------------------------
 MERGE_JOB=$(sbatch --parsable \
