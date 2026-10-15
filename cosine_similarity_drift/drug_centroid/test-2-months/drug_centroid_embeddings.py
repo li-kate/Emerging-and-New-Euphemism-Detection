@@ -28,6 +28,7 @@ from transformers import AutoModel, AutoTokenizer
 # ──────────────────────────────────────────────────────────────
 REDDIT_MONTHLY_DIR = "/storage/cedar/cedar0/cedarp-smussmann3-0/kmehta301/reddit_zst"
 SYNONYMS_FILE = "drug_synonyms.txt"
+SUBREDDIT_LIST_FILE = "drug_subreddit_list.txt"
 OUTPUT_DIR = "/storage/ice1/0/1/kli605/Emerging-and-New-Euphemism-Detection/cosine_similarity_drift/drug_centroid/checkpoints"
 MODEL_NAME = "bert-base-uncased"
 BATCH_SIZE = 128
@@ -68,6 +69,34 @@ def load_target_words(path: str) -> list[str]:
     return result
 
 
+def load_allowed_subreddits(path: str) -> set[str]:
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Subreddit list file not found: {path}")
+    subreddits = set()
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip().lower()
+            # Ignore headers, empty lines, and separator dashes
+            if not line or line.startswith("#") or line.startswith("—") or line.startswith("-"):
+                continue
+            # Remove leading r/ or /r/ prefixes if present
+            if line.startswith("r/"):
+                line = line[2:]
+            elif line.startswith("/r/"):
+                line = line[3:]
+            elif line.startswith("/"):
+                line = line[1:]
+            
+            # Subreddit names cannot contain spaces
+            if line and " " not in line:
+                subreddits.add(line)
+                
+    if not subreddits:
+        raise ValueError(f"No valid subreddits found in {path}")
+    print(f"Loaded {len(subreddits):,} allowed subreddits from {path}")
+    return subreddits
+
+
 def build_matcher(words: list[str]):
     try:
         import ahocorasick
@@ -99,18 +128,12 @@ def find_all_spans(text: str, automaton) -> list[tuple[str, int, int]]:
     return matches
 
 
-def _process_line(line: str) -> dict | None:
-    try:
-        obj = json_loads(line)
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(obj, dict):
-        return None
-
+def _process_line(obj: dict) -> dict | None:
     
     body = obj.get("body", "")
     selftext = obj.get("selftext", "")
     title = obj.get("title", "")
+    subreddit = obj.get("subreddit", "")
 
     if body in ("[deleted]", "[removed]"):
         body = ""
@@ -134,24 +157,47 @@ def _process_line(line: str) -> dict | None:
     except (TypeError, ValueError, OverflowError, OSError):
         return None
     
-    return {"text": text, "timestamp_dt": timestamp_dt}
+    return {"text": text, "timestamp_dt": timestamp_dt, "subreddit": subreddit}
 
 
-def stream_reddit_file(path: str) -> Iterator[dict]:
-    """Stream JSONL records from a Reddit zstandard dump."""
+def stream_reddit_file(
+    path: str,
+    allowed_subreddits: set[str],
+) -> Iterator[dict]:
+    """Stream JSONL records, filtering subreddits before text processing."""
     try:
         import zstandard as zstd
     except ImportError as exc:
-        raise RuntimeError("zstandard is required. Install it with: pip install zstandard") from exc
+        raise RuntimeError(
+            "zstandard is required. Install it with: pip install zstandard"
+        ) from exc
 
-    # Do not restart from byte zero on decompression errors: that could silently
-    # double-count records. A corrupt dump fails the task visibly instead.
     with open(path, "rb") as fh:
         dctx = zstd.ZstdDecompressor(max_window_size=2147483648)
         with dctx.stream_reader(fh, read_size=2**20) as reader:
-            with io.TextIOWrapper(reader, encoding="utf-8", errors="replace") as text_stream:
+            with io.TextIOWrapper(
+                reader, encoding="utf-8", errors="replace"
+            ) as text_stream:
                 for line in text_stream:
-                    record = _process_line(line)
+                    # Parse JSON once.
+                    try:
+                        obj = json_loads(line)
+                    except (ValueError, TypeError):
+                        continue
+
+                    if not isinstance(obj, dict):
+                        continue
+
+                    # Filter before cleaning text or parsing timestamps.
+                    subreddit = obj.get("subreddit", "")
+                    if not isinstance(subreddit, str):
+                        continue
+
+                    if subreddit.lower() not in allowed_subreddits:
+                        continue
+
+                    # Process only records from allowed subreddits.
+                    record = _process_line(obj)
                     if record is not None:
                         yield record
 
@@ -269,6 +315,7 @@ def main():
         raise ValueError("TASK_ID must be >= 0")
 
     words = load_target_words(SYNONYMS_FILE)
+    allowed_subreddits = load_allowed_subreddits(SUBREDDIT_LIST_FILE)
     automaton = build_matcher(words)
     dump_files = sorted(
         glob.glob(os.path.join(REDDIT_MONTHLY_DIR, "RC_*.zst"))
@@ -323,7 +370,8 @@ def main():
             entry["count"] += 1
             stats["embedded"] += 1
 
-    for record in stream_reddit_file(target_file):
+    for record in stream_reddit_file(target_file, allowed_subreddits):
+
         valid_record_index += 1
         if valid_record_index <= rows_to_skip:
             continue
