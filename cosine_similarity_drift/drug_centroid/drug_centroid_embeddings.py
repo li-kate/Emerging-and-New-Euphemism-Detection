@@ -118,7 +118,7 @@ def _process_line(line: str) -> dict | None:
         selftext = ""
 
     parts = []
-    
+
     for part in (title, selftext, body):
         if isinstance(part, str) and part.strip():
             cleaned = WHITESPACE_RE.sub(" ", URL_RE.sub("", part)).strip()
@@ -133,9 +133,7 @@ def _process_line(line: str) -> dict | None:
         timestamp_dt = datetime.fromtimestamp(float(obj.get("created_utc")), tz=timezone.utc)
     except (TypeError, ValueError, OverflowError, OSError):
         return None
-    body = WHITESPACE_RE.sub(" ", URL_RE.sub("", body)).strip()
-    if len(body.split()) < 3:
-        return None
+    
     return {"text": text, "timestamp_dt": timestamp_dt}
 
 
