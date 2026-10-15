@@ -608,6 +608,20 @@ def main():
         help="round-robin split only: total number of stride tasks. Defaults "
         "to $SLURM_ARRAY_TASK_COUNT if set. Ignored for month split.",
     )
+    shard.add_argument(
+        "--max-months",
+        type=int,
+        default=None,
+        help="month split only: process only the first N months (sorted). "
+        "Useful for a small test run, e.g. --max-months 2.",
+    )
+    shard.add_argument(
+        "--months",
+        nargs="+",
+        default=None,
+        help="month split only: restrict to these month keys (e.g. RC_2015-01 "
+        "RS_2015-01). Overrides --max-months.",
+    )
 
     # --- Inputs (pick one or more) ---
     src = parser.add_argument_group("inputs")
@@ -710,6 +724,24 @@ def main():
     if args.mode == "map" and args.split == "month":
         months = group_by_month(all_paths)
         month_keys = list(months)
+
+        # Optional restriction for test runs: an explicit month list takes
+        # precedence over a first-N cap. The array must be sized to match the
+        # restricted list, since the index selects into it.
+        if args.months:
+            requested = list(args.months)
+            missing = [m for m in requested if m not in months]
+            if missing:
+                logger.warning("Requested months not found in input: %s",
+                               ", ".join(missing))
+            month_keys = [m for m in requested if m in months]
+        elif args.max_months is not None:
+            month_keys = month_keys[: args.max_months]
+
+        if not month_keys:
+            logger.error("No months to process after --months/--max-months.")
+            sys.exit(1)
+
         if args.shard_index >= len(month_keys):
             logger.info(
                 "Task %d >= %d months; nothing to do.",

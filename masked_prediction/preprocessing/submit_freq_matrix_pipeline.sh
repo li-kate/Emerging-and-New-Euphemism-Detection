@@ -30,10 +30,15 @@ SHARD_DIR="${OUT_DIR}/shards"
 STEM="freq"
 DTYPE="int32"
 
-# Optional cap on how many array tasks run at once (not how many months). This
-# is the SLURM array throttle "%N". Empty means no throttle. Override with e.g.
-#   MAX_CONCURRENT=20 ./submit_freq_matrix_pipeline.sh
-MAX_CONCURRENT="${MAX_CONCURRENT:-}"
+# How many array tasks run at once (NOT how many months). This becomes the
+# SLURM array throttle "%N", so the full month array can be submitted at once
+# and SLURM drains it in waves.
+#
+# Default 50 matches the ICE QOS MaxJobsPU (coc-ice / coe-ice = 50 running
+# jobs per user). The whole array still fits under the 500 MaxSubmit cap, so
+# submitting all ~168 months in one array is fine; only 50 run concurrently.
+# Set to a smaller number to be a good neighbor, or "0" to remove the throttle.
+MAX_CONCURRENT="${MAX_CONCURRENT:-50}"
 
 # --- Count distinct months ---------------------------------------------------
 # Group dump files by RC_/RS_ YYYY-MM prefix (parts share a month), matching
@@ -69,9 +74,14 @@ mkdir -p "$SHARD_DIR"
 rm -f "$SHARD_DIR"/*.part.json "$SHARD_DIR"/*.part.json.tmp 2>/dev/null || true
 
 # --- Map array: one task per month -------------------------------------------
+# Throttle to %MAX_CONCURRENT running tasks (0 or empty = no throttle). There
+# is no point throttling below the month count.
 ARRAY_SPEC="0-$((NUM_MONTHS - 1))"
-if [[ -n "$MAX_CONCURRENT" ]]; then
+if [[ -n "$MAX_CONCURRENT" && "$MAX_CONCURRENT" -gt 0 ]]; then
     ARRAY_SPEC="${ARRAY_SPEC}%${MAX_CONCURRENT}"
+    echo "Submitting $NUM_MONTHS month tasks, running <= $MAX_CONCURRENT at once."
+else
+    echo "Submitting $NUM_MONTHS month tasks with no concurrency throttle."
 fi
 
 MAP_JOB=$(sbatch --parsable \
