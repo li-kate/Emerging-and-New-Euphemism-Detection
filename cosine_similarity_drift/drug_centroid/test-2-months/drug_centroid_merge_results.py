@@ -1,39 +1,3 @@
-"""
-Merge partial embedding outputs into ONE global drug centroid.
-
-Input files are produced by drug_centroid_embeddings_fixed.py and have the
-structure:
-    {
-        "data": {
-            "<drug_term>": {
-                "YYYY-MM": {
-                    "sum_embedding": [ ... ],
-                    "count": 123
-                }
-            }
-        },
-        "stats": { ... }
-    }
-
-For each drug term, this script first aggregates its monthly/task sums and
-counts. It then combines all drug terms using their occurrence counts to
-produce one frequency-weighted centroid across all drug-term occurrences.
-
-Mathematically:
-    term_sum[t]   = sum of monthly/task sum_embedding vectors for term t
-    term_count[t] = sum of monthly/task counts for term t
-
-    drug_sum      = sum_t term_sum[t]
-    drug_count    = sum_t term_count[t]
-    drug_centroid = drug_sum / drug_count
-
-This is equivalent to averaging all embedded occurrences across all drug
-terms, with each occurrence contributing equally.
-
-By default, reads partial_results_*.json from the current directory and writes
-global_drug_centroid.json.
-"""
-
 import glob
 import json
 import os
@@ -41,7 +5,7 @@ import os
 import numpy as np
 
 
-RESULTS_DIR = "/storage/cedar/cedar0/cedarp-smussmann3-0/kmehta301/drug_centroids"
+RESULTS_DIR = "/storage/ice1/0/1/kli605/Emerging-and-New-Euphemism-Detection/cosine_similarity_drift/drug_centroid/checkpoints"
 OUTPUT_PATH = os.path.join(RESULTS_DIR, "global_drug_centroid.json")
 INPUT_PATTERN = "partial_results_*.json"
 
@@ -62,7 +26,6 @@ def merge_partial_results(
     print(f"Found {len(partial_files)} partial result file(s).")
 
     # First aggregate per term across all months and partial files.
-    # term_agg[word] = {"sum_embedding": vector sum, "count": occurrence count}
     term_agg = {}
 
     for file_path in partial_files:
@@ -128,7 +91,6 @@ def merge_partial_results(
     drug_sum = None
     drug_count = 0
 
-    per_term_summary = {}
     for term, agg in sorted(term_agg.items()):
         if agg["count"] == 0:
             continue
@@ -144,16 +106,6 @@ def merge_partial_results(
         drug_sum += agg["sum_embedding"]
         drug_count += agg["count"]
 
-        # Keep per-term statistics in the output for auditing; this does not
-        # change the fact that the primary centroid is one global drug centroid.
-        per_term_summary[term] = {
-            "sum_embedding": agg["sum_embedding"].tolist(),
-            "count": agg["count"],
-            "centroid": (
-                agg["sum_embedding"] / agg["count"]
-            ).tolist(),
-        }
-
     if drug_count == 0 or drug_sum is None:
         raise ValueError(
             "No embedded drug-term occurrences with positive counts were found."
@@ -161,20 +113,13 @@ def merge_partial_results(
 
     drug_centroid = drug_sum / drug_count
 
+    # Save ONLY the global drug centroid structure requested
     output_payload = {
         "drug_centroid": {
             "centroid": drug_centroid.tolist(),
             "sum_embedding": drug_sum.tolist(),
             "count": drug_count,
-        },
-        "per_term": per_term_summary,
-        "metadata": {
-            "source_files": [os.path.basename(p) for p in partial_files],
-            "num_source_files": len(partial_files),
-            "num_terms": len(per_term_summary),
-            "total_occurrences": drug_count,
-            "aggregation": "frequency-weighted across all drug-term occurrences",
-        },
+        }
     }
 
     output_dir = os.path.dirname(os.path.abspath(output_path))
@@ -183,15 +128,9 @@ def merge_partial_results(
         json.dump(output_payload, f, indent=2)
 
     print("\n--- Global Drug Centroid ---")
-    print(f"Drug terms included: {len(per_term_summary):,}")
     print(f"Total embedded occurrences: {drug_count:,}")
     print(f"Centroid dimension: {drug_centroid.size}")
     print(f"Saved global drug centroid to: {output_path}")
-    print(
-        "\nWarning: make sure the input directory contains only the intended "
-        "partial result files. Including duplicate task outputs will double-count "
-        "their embeddings."
-    )
 
 
 if __name__ == "__main__":
