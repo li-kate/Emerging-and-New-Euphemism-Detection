@@ -30,6 +30,11 @@ SHARD_DIR="${OUT_DIR}/shards"
 STEM="freq"
 DTYPE="int32"
 
+# Sample this many removed terms per filter bucket (examples only, logged and
+# saved to freq_meta.json). 0 = off. Each map task samples its own month;
+# the merge shows the same count, pooled from the per-shard samples.
+SAMPLE_REMOVED="${SAMPLE_REMOVED:-50}"
+
 # How many array tasks run at once (NOT how many months). This becomes the
 # SLURM array throttle "%N", so the full month array can be submitted at once
 # and SLURM drains it in waves.
@@ -107,7 +112,8 @@ MAP_JOB=$(sbatch --parsable \
             --reddit-monthly-dir '$DUMP_DIR' \
             --subreddit-file '$SUBREDDIT_FILE' \
             --shard-dir '$SHARD_DIR' \
-            --shard-index \"\$SLURM_ARRAY_TASK_ID\"
+            --shard-index \"\$SLURM_ARRAY_TASK_ID\" \
+            --sample-removed $SAMPLE_REMOVED
     ")
 
 echo "Submitted map array: $MAP_JOB ($ARRAY_SPEC) — one task per month"
@@ -134,7 +140,8 @@ MERGE_JOB=$(sbatch --parsable \
             --out-dir '$OUT_DIR' \
             --subreddit-file '$SUBREDDIT_FILE' \
             --stem '$STEM' \
-            --dtype '$DTYPE'
+            --dtype '$DTYPE' \
+            --sample-removed $SAMPLE_REMOVED
     ")
 
 echo "Submitted merge job: $MERGE_JOB"

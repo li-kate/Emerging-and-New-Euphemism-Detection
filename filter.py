@@ -102,8 +102,15 @@ def log_prefilter_counts(
     total,
     min_term_length=MIN_TERM_LENGTH,
     max_words=MAX_WORDS,
+    samples=None,
 ):
-    """Print how many terms each prefilter removed."""
+    """
+    Print how many terms each prefilter removed.
+
+    If ``samples`` is given (a dict mapping each bucket name to a list of
+    example removed terms), a sample of removed words is printed under each
+    bucket. Samples are examples only, not an exhaustive list.
+    """
     removed = sum(counts.values())
 
     print("\n========================================")
@@ -135,13 +142,34 @@ def log_prefilter_counts(
         f"{total - removed:,}"
     )
 
+    if samples:
+        _print_removed_samples(
+            samples,
+            labels={
+                "short_terms": f"<{min_term_length}-character terms",
+                "multi_word_terms": f">{max_words}-word terms",
+                "stop_words": "stop words",
+            },
+        )
+
+
+def _print_removed_samples(samples, labels):
+    """Print a sample of removed terms for each bucket (examples only)."""
+    print("\n--- sample of removed terms (examples only) ---")
+    for key, label in labels.items():
+        sample = samples.get(key) or []
+        if not sample:
+            continue
+        print(f"{label} ({len(sample)} shown):")
+        print("  " + ", ".join(sample))
+
 # POSTFILTER SETTINGS
 
 # Minimum frequency a word must reach in at least one half-year to be kept.
 MIN_FREQ = 30
 
 
-def postfilter(freq, words, min_freq=MIN_FREQ):
+def postfilter(freq, words, min_freq=MIN_FREQ, sample_removed=0, rng=None):
     """
     Apply the postfilter to a built frequency matrix.
 
@@ -152,27 +180,49 @@ def postfilter(freq, words, min_freq=MIN_FREQ):
     half-years.
 
     Args:
-      freq      - 2D array of shape [half_years, words] with occurrence
-                  counts.
-      words     - sequence of word labels in column order; must line up
-                  with ``freq``'s columns.
-      min_freq  - minimum count a word must reach in at least one
-                  half-year (defaults to MIN_FREQ).
+      freq            - 2D array of shape [half_years, words] with occurrence
+                        counts.
+      words           - sequence of word labels in column order; must line up
+                        with ``freq``'s columns.
+      min_freq        - minimum count a word must reach in at least one
+                        half-year (defaults to MIN_FREQ).
+      sample_removed  - if > 0, also return a uniform random sample of up to
+                        this many removed word labels.
+      rng             - optional ``random.Random`` for a reproducible sample.
 
     Returns:
       freq_kept   - ``freq`` with only the kept columns.
       kept_words  - list of the kept word labels, in the same order.
       counts      - dict with the number of words removed under the
                     "low_frequency" key.
+      samples     - list of up to ``sample_removed`` removed word labels
+                    (empty when ``sample_removed == 0``).
     """
+    import random as _random
+
     keep = freq.max(axis=0) >= min_freq
     kept_words = [w for w, k in zip(words, keep) if k]
     counts = {"low_frequency": int((~keep).sum())}
-    return freq[:, keep], kept_words, counts
+
+    samples = []
+    if sample_removed > 0:
+        removed_words = [w for w, k in zip(words, keep) if not k]
+        r = rng or _random.Random()
+        if len(removed_words) <= sample_removed:
+            samples = list(removed_words)
+        else:
+            samples = r.sample(removed_words, sample_removed)
+
+    return freq[:, keep], kept_words, counts, samples
 
 
-def log_postfilter_counts(counts, total, min_freq=MIN_FREQ):
-    """Print how many words the postfilter removed."""
+def log_postfilter_counts(counts, total, min_freq=MIN_FREQ, samples=None):
+    """
+    Print how many words the postfilter removed.
+
+    If ``samples`` is a list of example removed words, it is printed below the
+    counts. Samples are examples only, not an exhaustive list.
+    """
     removed = counts["low_frequency"]
 
     print("\n========================================")
@@ -191,3 +241,8 @@ def log_postfilter_counts(counts, total, min_freq=MIN_FREQ):
         f"Kept terms:                       "
         f"{total - removed:,}"
     )
+
+    if samples:
+        print(f"\n--- sample of removed terms (examples only, {len(samples)} "
+              f"shown) ---")
+        print("  " + ", ".join(samples))

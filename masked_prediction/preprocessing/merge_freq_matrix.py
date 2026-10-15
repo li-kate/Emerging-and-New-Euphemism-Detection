@@ -28,6 +28,7 @@ import glob
 import json
 import logging
 import os
+import random
 from collections import defaultdict
 
 import numpy as np
@@ -35,6 +36,7 @@ import numpy as np
 # Reuse everything shared with the single-process build.
 from freq_matrix import (
     MIN_FREQ,
+    PREFILTER_BUCKETS,
     SHARD_SUFFIX,
     assemble_matrix,
     build_output_names,
@@ -68,19 +70,26 @@ def merge_shards(shard_files):
     """
     Sum all shards into global counts and tallies.
 
-    Returns the same four values ``build_counts`` returns, so the downstream
-    assemble/postfilter/save path is identical to the single-process build:
+    Returns, so the downstream assemble/postfilter/save path is identical to
+    the single-process build:
       counts            - dict[word] -> dict[half_year] -> int
       totals_raw        - dict[half_year] -> int
       prefilter_counts  - dict[rule] -> int
       half_years        - set of half-year labels
-    Also returns the summed scope drop counts for logging.
+      drop_counts       - summed scope drop counts (for logging)
+      pooled_samples    - dict[bucket] -> list of removed-term examples pooled
+                          from every shard's per-shard sample (deduplicated).
+                          This is NOT a corpus-uniform sample; it is the union
+                          of per-shard samples, which the caller then trims to
+                          the requested size.
     """
     counts = defaultdict(lambda: defaultdict(int))
     totals_raw = defaultdict(int)
-    prefilter_counts = {"short_terms": 0, "multi_word_terms": 0, "stop_words": 0}
+    prefilter_counts = {b: 0 for b in PREFILTER_BUCKETS}
     drop_counts = defaultdict(int)
     half_years = set()
+    pooled_samples = {b: [] for b in PREFILTER_BUCKETS}
+    seen_samples = {b: set() for b in PREFILTER_BUCKETS}
 
     for i, path in enumerate(shard_files, 1):
         with open(path, encoding="utf-8") as f:
@@ -99,6 +108,15 @@ def merge_shards(shard_files):
         for rule, c in shard.get("prefilter_counts", {}).items():
             prefilter_counts[rule] = prefilter_counts.get(rule, 0) + c
 
+        for bucket, words in shard.get("prefilter_samples", {}).items():
+            if bucket not in pooled_samples:
+                pooled_samples[bucket] = []
+                seen_samples[bucket] = set()
+            for w in words:
+                if w not in seen_samples[bucket]:
+                    seen_samples[bucket].add(w)
+                    pooled_samples[bucket].append(w)
+
         for reason, c in shard.get("drop_counts", {}).items():
             drop_counts[reason] += c
 
@@ -113,7 +131,8 @@ def merge_shards(shard_files):
             f"{len(counts):,}",
         )
 
-    return counts, totals_raw, prefilter_counts, half_years, drop_counts
+    return (counts, totals_raw, prefilter_counts, half_years, drop_counts,
+            pooled_samples)
 
 
 def main():
@@ -159,28 +178,57 @@ def main():
     parser.add_argument("--start-year", type=int, default=2012)
     parser.add_argument("--end-year", type=int, default=2026)
     parser.add_argument("--version", default="unversioned")
+    parser.add_argument(
+        "--sample-removed",
+        type=int,
+        default=0,
+        help="If > 0, log/record a sample of this many removed terms per "
+        "filter bucket. Prefilter samples are pooled from the per-shard "
+        "samples (not corpus-uniform); the postfilter sample is drawn here "
+        "from all removed words. Default 0 = off.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Optional RNG seed for reproducible removed-term samples.",
+    )
 
     args = parser.parse_args()
 
     dtype = np.int32 if args.dtype == "int32" else np.int64
     names = build_output_names(args.stem)
+    rng = random.Random(args.seed) if args.seed is not None else random.Random()
 
     # Reduce.
     shard_files = find_shards(args.shard_dir)
     logger.info("Found %d shard(s) in %s", len(shard_files), args.shard_dir)
 
-    counts, totals_raw, prefilter_counts, half_years, drop_counts = merge_shards(
-        shard_files
-    )
+    (counts, totals_raw, prefilter_counts, half_years, drop_counts,
+     pooled_samples) = merge_shards(shard_files)
 
     if not counts:
         logger.error("No terms after merging shards. Check the map outputs.")
         raise SystemExit(1)
 
+    # Trim pooled per-shard prefilter samples to the requested size so the
+    # merge shows the same sample count as each shard.
+    prefilter_samples = None
+    if args.sample_removed:
+        prefilter_samples = {}
+        for bucket, pool in pooled_samples.items():
+            if len(pool) <= args.sample_removed:
+                prefilter_samples[bucket] = list(pool)
+            else:
+                prefilter_samples[bucket] = rng.sample(pool, args.sample_removed)
+
     # Log prefilter (summed across shards) and scope drops.
     n_kept_terms = len(counts)
     n_prefiltered = sum(prefilter_counts.values())
-    log_prefilter_counts(prefilter_counts, n_kept_terms + n_prefiltered)
+    log_prefilter_counts(
+        prefilter_counts, n_kept_terms + n_prefiltered,
+        samples=prefilter_samples,
+    )
     logger.info(
         "Scope drops — subreddit:%s empty:%s year:%s bad_ts:%s parse:%s",
         f"{drop_counts['subreddit']:,}",
@@ -195,8 +243,13 @@ def main():
     logger.info("Pre-postfilter matrix: %s", freq.shape)
 
     total_before = len(words)
-    freq, words, postfilter_counts = postfilter(freq, words, args.min_freq)
-    log_postfilter_counts(postfilter_counts, total_before, args.min_freq)
+    freq, words, postfilter_counts, postfilter_samples = postfilter(
+        freq, words, args.min_freq, args.sample_removed, rng
+    )
+    log_postfilter_counts(
+        postfilter_counts, total_before, args.min_freq,
+        samples=postfilter_samples if args.sample_removed else None,
+    )
 
     totals_filtered = {h: int(freq[i].sum()) for i, h in enumerate(half_years)}
 
@@ -223,6 +276,10 @@ def main():
         scope,
         args,
         names,
+        filter_samples=(
+            {**prefilter_samples, "low_frequency": postfilter_samples}
+            if args.sample_removed else None
+        ),
     )
 
     logger.info(

@@ -31,6 +31,9 @@ SHARD_DIR="${OUT_DIR}/shards"
 STEM="freq"
 DTYPE="int32"
 
+# Sample this many removed terms per filter bucket (examples only). 0 = off.
+SAMPLE_REMOVED="${SAMPLE_REMOVED:-50}"
+
 # How many months to test, and the array size that must match it.
 MAX_MONTHS="${MAX_MONTHS:-2}"
 
@@ -73,7 +76,8 @@ MAP_JOB=$(sbatch --parsable \
             --reddit-monthly-dir '$DUMP_DIR' \
             --subreddit-file '$SUBREDDIT_FILE' \
             --shard-dir '$SHARD_DIR' \
-            --shard-index \"\$SLURM_ARRAY_TASK_ID\"
+            --shard-index \"\$SLURM_ARRAY_TASK_ID\" \
+            --sample-removed $SAMPLE_REMOVED
     ")
 
 echo "Submitted test map array: $MAP_JOB (0-$((MAX_MONTHS - 1)))"
@@ -100,7 +104,8 @@ MERGE_JOB=$(sbatch --parsable \
             --out-dir '$OUT_DIR' \
             --subreddit-file '$SUBREDDIT_FILE' \
             --stem '$STEM' \
-            --dtype '$DTYPE'
+            --dtype '$DTYPE' \
+            --sample-removed $SAMPLE_REMOVED
     ")
 
 echo "Submitted test merge job: $MERGE_JOB"

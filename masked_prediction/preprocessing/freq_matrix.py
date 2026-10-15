@@ -55,6 +55,7 @@ import io
 import json
 import logging
 import os
+import random
 import re
 import sys
 from collections import defaultdict
@@ -139,6 +140,33 @@ def tokenize(text):
 def half_year_label(dt):
     """Return the half-year label for a datetime, e.g. ``2012H1``."""
     return f"{dt.year}H{1 if dt.month <= 6 else 2}"
+
+
+class Reservoir:
+    """
+    Fixed-size uniform random sample over a stream (reservoir sampling).
+
+    Used to collect an example sample of removed terms per filter bucket
+    without storing every dropped word. ``add`` keeps a uniform sample of
+    size ``k`` over all items offered. ``capacity == 0`` disables sampling.
+    """
+
+    def __init__(self, k, rng=None):
+        self.k = k
+        self.n = 0  # how many items have been offered
+        self.items = []
+        self._rng = rng or random.Random()
+
+    def add(self, item):
+        if self.k <= 0:
+            return
+        self.n += 1
+        if len(self.items) < self.k:
+            self.items.append(item)
+        else:
+            j = self._rng.randint(0, self.n - 1)
+            if j < self.k:
+                self.items[j] = item
 
 
 # ============================================================================
@@ -248,7 +276,10 @@ def stream_corpus(
 # ============================================================================
 
 
-def build_counts(stream, allowed_term_cache):
+PREFILTER_BUCKETS = ("short_terms", "multi_word_terms", "stop_words")
+
+
+def build_counts(stream, allowed_term_cache, sample_removed=0, rng=None):
     """
     Accumulate per (half-year, word) occurrence counts from the stream.
 
@@ -259,14 +290,21 @@ def build_counts(stream, allowed_term_cache):
       prefilter_counts - counts of terms dropped by each prefilter rule,
                     attributed the first time each unique term is seen.
       half_years  - set of half-year labels observed.
+      prefilter_samples - dict[bucket] -> list of up to ``sample_removed``
+                    example removed terms (uniform reservoir sample over the
+                    unique terms this call dropped). Empty lists when
+                    ``sample_removed == 0``.
 
     ``allowed_term_cache`` maps a seen token to True/False (passes the
     prefilter); it is populated lazily so the prefilter runs once per unique
-    term rather than once per occurrence.
+    term rather than once per occurrence. Sampling likewise happens the first
+    time a unique term is seen, so each distinct removed term is offered to
+    the reservoir once (not once per occurrence).
     """
     counts = defaultdict(lambda: defaultdict(int))
     totals_raw = defaultdict(int)
-    prefilter_counts = {"short_terms": 0, "multi_word_terms": 0, "stop_words": 0}
+    prefilter_counts = {b: 0 for b in PREFILTER_BUCKETS}
+    reservoirs = {b: Reservoir(sample_removed, rng) for b in PREFILTER_BUCKETS}
     half_years = set()
 
     n_records = 0
@@ -288,6 +326,7 @@ def build_counts(stream, allowed_term_cache):
                     for key, val in c.items():
                         if val:
                             prefilter_counts[key] += 1
+                            reservoirs[key].add(tok)
                             break
                 allowed_term_cache[tok] = passes
 
@@ -303,7 +342,8 @@ def build_counts(stream, allowed_term_cache):
 
     logger.info("Counting done: %s records, %s unique kept terms",
                 f"{n_records:,}", f"{len(counts):,}")
-    return counts, totals_raw, prefilter_counts, half_years
+    prefilter_samples = {b: list(reservoirs[b].items) for b in PREFILTER_BUCKETS}
+    return counts, totals_raw, prefilter_counts, half_years, prefilter_samples
 
 
 def assemble_matrix(counts, half_years, dtype):
@@ -352,6 +392,7 @@ def save_outputs(
     scope,
     args,
     names,
+    filter_samples=None,
 ):
     """Write the matrix, labels, stop-word list, totals, and metadata."""
     os.makedirs(out_dir, exist_ok=True)
@@ -411,6 +452,11 @@ def save_outputs(
         "year_range": [args.start_year, args.end_year],
         "files": names,
     }
+    if filter_samples:
+        # Examples of removed terms per filter bucket (not exhaustive, and —
+        # in the merged/parallel case — pooled from per-shard samples rather
+        # than a corpus-uniform sample).
+        meta["filter_samples"] = filter_samples
     with open(p(names["meta"]), "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
     logger.info("Saved %s", p(names["meta"]))
@@ -435,6 +481,7 @@ def write_shard(
     drop_counts,
     files,
     shard_name=None,
+    prefilter_samples=None,
 ):
     """
     Write one map task's partial counts to ``<shard_dir>/<name>.part.json``.
@@ -460,6 +507,7 @@ def write_shard(
         "counts": {w: dict(hy) for w, hy in counts.items()},
         "totals_raw": dict(totals_raw),
         "prefilter_counts": dict(prefilter_counts),
+        "prefilter_samples": dict(prefilter_samples or {}),
         "half_years": sorted(half_years),
         "drop_counts": dict(drop_counts),
         "files": list(files),
@@ -686,6 +734,20 @@ def main():
         default="unversioned",
         help="Version/commit string recorded in the metadata.",
     )
+    out.add_argument(
+        "--sample-removed",
+        type=int,
+        default=0,
+        help="If > 0, collect and log a sample of this many removed terms per "
+        "filter bucket (prefilter buckets, and postfilter in build mode). "
+        "Samples are examples only, not exhaustive. Default 0 = off.",
+    )
+    out.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Optional RNG seed for reproducible removed-term samples.",
+    )
 
     args = parser.parse_args()
 
@@ -778,6 +840,7 @@ def main():
         logger.info("Scope: all of Reddit")
 
     drop_counts = defaultdict(int)
+    rng = random.Random(args.seed) if args.seed is not None else random.Random()
 
     # A round-robin shard can get an empty slice (num_shards > num_files); it
     # still writes a valid empty shard so the merge step's count is
@@ -789,10 +852,10 @@ def main():
         write_shard(
             args.shard_dir, args.shard_index,
             counts={}, totals_raw={},
-            prefilter_counts={"short_terms": 0, "multi_word_terms": 0,
-                              "stop_words": 0},
+            prefilter_counts={b: 0 for b in PREFILTER_BUCKETS},
             half_years=set(), drop_counts=drop_counts, files=[],
             shard_name=shard_name,
+            prefilter_samples={b: [] for b in PREFILTER_BUCKETS},
         )
         return
 
@@ -802,8 +865,8 @@ def main():
 
     # Count.
     term_cache = {}
-    counts, totals_raw, prefilter_counts, half_years = build_counts(
-        stream, term_cache
+    counts, totals_raw, prefilter_counts, half_years, prefilter_samples = (
+        build_counts(stream, term_cache, args.sample_removed, rng)
     )
 
     logger.info(
@@ -827,6 +890,7 @@ def main():
             drop_counts,
             paths,
             shard_name=shard_name,
+            prefilter_samples=prefilter_samples,
         )
         logger.info("Map task %d done (%s).", args.shard_index,
                     shard_name or f"shard {args.shard_index}")
@@ -836,10 +900,13 @@ def main():
         logger.error("No terms survived counting. Check inputs and filters.")
         sys.exit(1)
 
-    # Log prefilter.
+    # Log prefilter (with a sample of removed terms when requested).
     n_kept_terms = len(counts)
     n_prefiltered = sum(prefilter_counts.values())
-    log_prefilter_counts(prefilter_counts, n_kept_terms + n_prefiltered)
+    log_prefilter_counts(
+        prefilter_counts, n_kept_terms + n_prefiltered,
+        samples=prefilter_samples if args.sample_removed else None,
+    )
 
     dtype = np.int32 if args.dtype == "int32" else np.int64
 
@@ -848,8 +915,13 @@ def main():
     logger.info("Pre-postfilter matrix: %s", freq.shape)
 
     total_before = len(words)
-    freq, words, postfilter_counts = postfilter(freq, words, args.min_freq)
-    log_postfilter_counts(postfilter_counts, total_before, args.min_freq)
+    freq, words, postfilter_counts, postfilter_samples = postfilter(
+        freq, words, args.min_freq, args.sample_removed, rng
+    )
+    log_postfilter_counts(
+        postfilter_counts, total_before, args.min_freq,
+        samples=postfilter_samples if args.sample_removed else None,
+    )
 
     # Per-half-year filtered totals (sum over kept columns).
     totals_filtered = {
@@ -878,6 +950,10 @@ def main():
         scope,
         args,
         names,
+        filter_samples=(
+            {**prefilter_samples, "low_frequency": postfilter_samples}
+            if args.sample_removed else None
+        ),
     )
 
     logger.info(
