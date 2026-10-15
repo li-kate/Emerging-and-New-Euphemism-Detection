@@ -3,15 +3,19 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-# Must match FREQ_DIR in cosine_similarity_preprocess.py.
-HALF_YEAR_CSV="../frequency_matrix/freq_half_years.csv"
+# --- Frequency-matrix location (must match cosine_similarity_preprocess.py) --
+# Mirrors submit_hit_matrix_pipeline.sh: point at the existing frequency matrix
+# via FREQ_DIR + FREQ_STEM and derive the per-file paths from them.
+FREQ_DIR="../frequency_matrix"            # existing frequency matrix
+FREQ_STEM="freq"
+HALF_YEAR_CSV="${FREQ_DIR}/${FREQ_STEM}_half_years.csv"
 
 mkdir -p logs_cosine_similarity
 
 # Verify the input exists.
 if [[ ! -f "$HALF_YEAR_CSV" ]]; then
     echo "ERROR: Cannot find $HALF_YEAR_CSV"
-    echo "Update HALF_YEAR_CSV to match your frequency-matrix directory."
+    echo "       Update FREQ_DIR/FREQ_STEM to match your frequency-matrix directory."
     exit 1
 fi
 
