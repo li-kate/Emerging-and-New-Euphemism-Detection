@@ -33,6 +33,5 @@ echo "============================================"
 
 # Unbuffered output for real-time logs
 python -u drug_centroid_embeddings.py
-python -u drug_centroid_merge_results.py
 
 echo "Process Finished at: $(date)"
