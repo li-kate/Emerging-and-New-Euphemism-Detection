@@ -274,13 +274,19 @@ def main():
     )
 
     if not eligible_pos:
-        logger.error(
-            "No eligible positives. Loosen --min-freq / --min-periods, or "
-            "check that the DEA terms match the matrix's tokenization "
-            "(lowercase, single word)."
+        # Not fatal: the hit matrix still scores and aggregates every target
+        # word. An empty pilot set only means no per-context pilot rows are
+        # kept and k must be chosen without a labeled control set. Write a
+        # valid, empty pilot config and continue so the pipeline is not blocked.
+        logger.warning(
+            "No eligible positives. Writing an EMPTY pilot set and continuing. "
+            "The hit matrix will still aggregate all words, but there will be "
+            "no per-context pilot rows and no control set for choosing k. "
+            "To get a pilot set, loosen --min-freq / --min-periods, or check "
+            "that the DEA terms match the matrix's tokenization (lowercase, "
+            "single word)."
         )
-        raise SystemExit(1)
-    if len(eligible_pos) < args.n_pilot:
+    elif len(eligible_pos) < args.n_pilot:
         logger.warning(
             "Only %d eligible positives < --n-pilot %d; all go to the pilot "
             "set and the held-out set will be empty. Consider loosening the "
