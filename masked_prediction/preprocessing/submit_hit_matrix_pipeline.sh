@@ -98,7 +98,30 @@ PILOT_JOB=$(sbatch --parsable \
     ")
 echo "Submitted pilot job: $PILOT_JOB -> $PILOT_FILE"
 
-# --- Count distinct months (array size) --------------------------------------
+# --- Months to score = dump months that are IN the frequency matrix ----------
+# The frequency matrix was built on a specific scope and year range; its
+# freq_half_years.csv lists exactly the half-years it covers. Scoring a month
+# whose half-year is not in that file is wasted work (its hit cells would have
+# no frequency denominator and be masked anyway) and needlessly inflates the
+# array toward the QOS submit cap. So: glob the dump months, map each to its
+# half-year (months 1-6 -> H1, 7-12 -> H2, matching corpus_stream.half_year_label),
+# and keep only those whose half-year appears in the frequency matrix.
+HY_FILE="${FREQ_DIR}/${FREQ_STEM}_half_years.csv"
+if [[ ! -f "$HY_FILE" ]]; then
+    echo "ERROR: $HY_FILE not found; cannot restrict months to the matrix."
+    exit 1
+fi
+
+# Half-years present in the frequency matrix (skip the CSV header).
+mapfile -t FREQ_HYS < <(tail -n +2 "$HY_FILE" | tr -d '\r' | sed '/^$/d' | sort -u)
+if [[ ${#FREQ_HYS[@]} -eq 0 ]]; then
+    echo "ERROR: no half-years listed in $HY_FILE"
+    exit 1
+fi
+# Build a lookup set "|2012H1|2012H2|..." for cheap membership tests.
+FREQ_HY_SET="|$(IFS='|'; echo "${FREQ_HYS[*]}")|"
+echo "Frequency matrix covers ${#FREQ_HYS[@]} half-year(s): ${FREQ_HYS[*]}"
+
 shopt -s nullglob
 dumps=("$DUMP_DIR"/RC_*.zst "$DUMP_DIR"/RS_*.zst)
 shopt -u nullglob
@@ -107,22 +130,68 @@ if [[ ${#dumps[@]} -eq 0 ]]; then
     exit 1
 fi
 
-months=()
+# Distinct dump months (RC_/RS_ YYYY-MM), then filter to the matrix's half-years.
+all_months=()
 while IFS= read -r mkey; do
-    months+=("$mkey")
+    all_months+=("$mkey")
 done < <(
     for f in "${dumps[@]}"; do
         base=$(basename "$f")
         echo "${base:0:10}"   # RC_YYYY-MM / RS_YYYY-MM
     done | sort -u
 )
+
+months=()
+for mkey in "${all_months[@]}"; do
+    yr="${mkey:3:4}"      # YYYY
+    mon="${mkey:8:2}"     # MM
+    # strip a leading zero so "06" -> 6 for the arithmetic compare
+    half=$(( 10#$mon <= 6 ? 1 : 2 ))
+    hy="${yr}H${half}"
+    if [[ "$FREQ_HY_SET" == *"|$hy|"* ]]; then
+        months+=("$mkey")
+    fi
+done
+
 NUM_MONTHS=${#months[@]}
-echo "Found ${#dumps[@]} dump files across $NUM_MONTHS month(s)."
-echo "First/last month: ${months[0]} ... ${months[$((NUM_MONTHS - 1))]}"
+SKIPPED=$(( ${#all_months[@]} - NUM_MONTHS ))
+echo "Found ${#dumps[@]} dump files across ${#all_months[@]} dump month(s)."
+echo "Keeping $NUM_MONTHS month(s) in the frequency matrix; skipping $SKIPPED outside it."
+if [[ $NUM_MONTHS -eq 0 ]]; then
+    echo "ERROR: no dump months fall within the frequency matrix's half-years."
+    echo "       Check that DUMP_DIR and the frequency build cover the same period."
+    exit 1
+fi
+echo "First/last kept month: ${months[0]} ... ${months[$((NUM_MONTHS - 1))]}"
+
+# --- Guard against the QOS submit cap ----------------------------------------
+# %MAX_CONCURRENT only limits how many RUN at once; the whole array still
+# counts against the QOS "max submitted jobs per user" cap. If the array is
+# bigger than MAX_SUBMIT, submission will be rejected (QOSMaxSubmitJobPerUserLimit).
+# Set MAX_SUBMIT to your QOS cap (ICE default 500) minus whatever you already
+# have queued. If the kept array still exceeds it, submit in slices with
+# --months, e.g.:
+#   ./submit_hit_matrix_pipeline.sh   # edit MONTHS_SLICE below to a subset
+MAX_SUBMIT="${MAX_SUBMIT:-500}"
+if [[ $NUM_MONTHS -gt $MAX_SUBMIT ]]; then
+    echo ""
+    echo "ERROR: $NUM_MONTHS tasks exceeds MAX_SUBMIT=$MAX_SUBMIT (QOS submit cap)."
+    echo "       Even restricted to the matrix, the array is too large to submit at once."
+    echo "       Submit in slices by setting MONTHS_SLICE to a subset of these months"
+    echo "       and rerunning, or raise MAX_SUBMIT if your QOS allows it."
+    echo "       Kept months: ${months[*]}"
+    exit 1
+fi
 
 # --- Clean stale shards ------------------------------------------------------
 mkdir -p "$SHARD_DIR"
 rm -f "$SHARD_DIR"/*.part.json "$SHARD_DIR"/*.part.json.tmp 2>/dev/null || true
+
+# The map array must index into EXACTLY the kept months (not re-glob all dump
+# months), so pass the kept list to hit_matrix.py --months. select_month_key()
+# then restricts to this list and the array index selects the Nth kept month,
+# keeping the array index <-> month mapping correct.
+MONTHS_ARG="${months[*]}"
 
 # --- Map array: one GPU task per month ---------------------------------------
 ARRAY_SPEC="0-$((NUM_MONTHS - 1))"
@@ -161,6 +230,7 @@ MAP_JOB=$(sbatch --parsable \
             --pilot-file '$PILOT_FILE' \
             --shard-dir '$SHARD_DIR' \
             --shard-index \"\$SLURM_ARRAY_TASK_ID\" \
+            --months $MONTHS_ARG \
             --model-name '$MODEL_NAME' \
             --batch-size $BATCH_SIZE \
             --fp16
