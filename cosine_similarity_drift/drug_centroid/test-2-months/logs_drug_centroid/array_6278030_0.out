@@ -1,0 +1,29 @@
+---------------------------------------
+Begin Slurm Prolog: Oct-15-2026 00:24:32
+Job ID:    6278032
+User ID:   kli605
+Account:   coc
+Job name:  drug_centroid
+Partition: coe-gpu
+QOS:       coe-ice
+---------------------------------------
+Loaded 61 unique target terms from drug_synonyms.txt
+Loaded 170 allowed subreddits from drug_subreddit_list.txt
+Task 0/277: RC_2015-01.zst
+Output: /storage/ice1/0/1/kli605/Emerging-and-New-Euphemism-Detection/cosine_similarity_drift/drug_centroid/checkpoints/partial_results_0.json
+Loading bert-base-uncased on cuda...
+Token indices sequence length is longer than the specified maximum sequence length for this model (650 > 512). Running this sequence through the model will result in indexing errors
+Saved /storage/ice1/0/1/kli605/Emerging-and-New-Euphemism-Detection/cosine_similarity_drift/drug_centroid/checkpoints/partial_results_0.json; words embedded: 59; stats: {'valid_records_processed': 401860, 'matches_found': 50832, 'embedded': 50832, 'skipped_no_tokens': 0}
+---------------------------------------
+Begin Slurm Epilog: Oct-15-2026 00:29:14
+Job ID:        6278032
+Array Job ID:  6278030_0
+User ID:       kli605
+Account:       coc
+Job name:      drug_centroid
+Resources:     cpu=4,gres/gpu:h100=1,mem=32G,node=1
+Rsrc Used:     cput=00:18:48,vmem=0,walltime=00:04:42,mem=8132192K,energy_used=0
+Partition:     coe-gpu
+QOS:           coe-ice
+Nodes:         atl1-1-03-010-20-0
+---------------------------------------

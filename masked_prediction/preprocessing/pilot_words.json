@@ -1,0 +1,30 @@
+{
+  "created_utc": "2026-10-15T05:24:12.975035+00:00",
+  "seed": 0,
+  "source": {
+    "freq_dir": "/storage/ice1/0/1/kli605/Emerging-and-New-Euphemism-Detection/masked_prediction/preprocessing/freq_drug_subreddits",
+    "stem": "freq",
+    "dea_file": "/storage/ice1/0/1/kli605/Emerging-and-New-Euphemism-Detection/data_collection/word_lists/drug_synonyms.txt"
+  },
+  "eligibility": {
+    "min_freq": 50,
+    "min_periods": 8
+  },
+  "selection": {
+    "n_pilot": 30,
+    "neg_per_pos": 1,
+    "neg_top": 20
+  },
+  "counts": {
+    "eligible_positives": 0,
+    "negative_pool": 0,
+    "pilot_positives": 0,
+    "pilot_negatives": 0,
+    "heldout_positives": 0
+  },
+  "pilot_positives": [],
+  "pilot_negatives": [],
+  "hard_negatives": [],
+  "heldout_positives": [],
+  "pilot_words": []
+}

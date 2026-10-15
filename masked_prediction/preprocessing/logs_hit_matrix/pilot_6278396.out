@@ -1,0 +1,33 @@
+---------------------------------------
+Begin Slurm Prolog: Oct-15-2026 00:52:06
+Job ID:    6278396
+User ID:   kli605
+Account:   coc
+Job name:  hit_pilot
+Partition: pace-cpu
+QOS:       coe-ice
+---------------------------------------
+Defaulting to user installation because normal site-packages is not writeable
+Requirement already satisfied: numpy in /storage/pace-apps/manual/packages/anaconda3/2023.03/lib/python3.10/site-packages (1.24.3)
+Requirement already satisfied: pandas in /storage/pace-apps/manual/packages/anaconda3/2023.03/lib/python3.10/site-packages (2.2.0)
+Requirement already satisfied: python-dateutil>=2.8.2 in /storage/pace-apps/manual/packages/anaconda3/2023.03/lib/python3.10/site-packages (from pandas) (2.8.2)
+Requirement already satisfied: tzdata>=2022.7 in /storage/pace-apps/manual/packages/anaconda3/2023.03/lib/python3.10/site-packages (from pandas) (2023.4)
+Requirement already satisfied: pytz>=2020.1 in /storage/pace-apps/manual/packages/anaconda3/2023.03/lib/python3.10/site-packages (from pandas) (2022.7)
+Requirement already satisfied: six>=1.5 in /storage/pace-apps/manual/packages/anaconda3/2023.03/lib/python3.10/site-packages (from python-dateutil>=2.8.2->pandas) (1.16.0)
+2026-10-15 00:52:20,489 [INFO] Loaded frequency matrix: 1 half-years x 16489 words from freq_drug_subreddits
+2026-10-15 00:52:20,534 [INFO] Loaded 86 DEA terms from ../../data_collection/word_lists/drug_synonyms.txt
+2026-10-15 00:52:20,577 [INFO] Eligible positives (DEA & frequent enough): 0; negative pool: 0
+2026-10-15 00:52:20,577 [INFO] DEA terms present in matrix columns: 60 / 86 (rest never appeared or were filtered out of the matrix).
+2026-10-15 00:52:20,577 [ERROR] No eligible positives. Loosen --min-freq / --min-periods, or check that the DEA terms match the matrix's tokenization (lowercase, single word).
+---------------------------------------
+Begin Slurm Epilog: Oct-15-2026 00:52:20
+Job ID:        6278396
+User ID:       kli605
+Account:       coc
+Job name:      hit_pilot
+Resources:     cpu=1,mem=16G,node=1
+Rsrc Used:     cput=00:00:14,vmem=0,walltime=00:00:14,mem=73408K,energy_used=0
+Partition:     pace-cpu
+QOS:           coe-ice
+Nodes:         atl1-1-01-005-1-2
+---------------------------------------

@@ -1,0 +1,100 @@
+{
+  "_comment": "SAMPLE pilot word set, hand-built from data_collection/word_lists for testing choose_k.ipynb and hit_matrix.py WITHOUT a real frequency matrix. This was NOT produced by pilot_creation.py: the eligibility filter, seeded split, and frequency-matched negatives were not run (no freq.npy available). Negatives here are plausible placeholders, not log-frequency matches. Replace with the real pilot_words.json once submit_hit_matrix_pipeline.sh has run pilot_creation.py against the frequency matrix. Schema mirrors pilot_creation.py's output.",
+  "created_utc": "2026-10-15T00:00:00+00:00",
+  "seed": 0,
+  "source": {
+    "freq_dir": "freq_drug_subreddits (NOT USED - sample is hand-built)",
+    "stem": "freq",
+    "dea_file": "../../data_collection/word_lists/drug_synonyms.txt"
+  },
+  "eligibility": {
+    "min_freq": 50,
+    "min_periods": 8
+  },
+  "selection": {
+    "n_pilot": 12,
+    "neg_per_pos": 1,
+    "neg_top": 20
+  },
+  "counts": {
+    "eligible_positives": 12,
+    "negative_pool": 12,
+    "pilot_positives": 12,
+    "pilot_negatives": 12,
+    "heldout_positives": 8
+  },
+  "pilot_positives": [
+    {"word": "molly", "sense": "drug-sense"},
+    {"word": "coke", "sense": "ambiguous"},
+    {"word": "crack", "sense": "ambiguous"},
+    {"word": "ice", "sense": "ambiguous"},
+    {"word": "acid", "sense": "ambiguous"},
+    {"word": "weed", "sense": "ambiguous"},
+    {"word": "shrooms", "sense": "drug-sense"},
+    {"word": "ecstasy", "sense": "drug-sense"},
+    {"word": "xanax", "sense": "drug-sense"},
+    {"word": "adderall", "sense": "drug-sense"},
+    {"word": "ketamine", "sense": "drug-sense"},
+    {"word": "fentanyl", "sense": "drug-sense"}
+  ],
+  "pilot_negatives": [
+    "coffee",
+    "sugar",
+    "water",
+    "music",
+    "chair",
+    "window",
+    "garden",
+    "pizza",
+    "laptop",
+    "blanket",
+    "pencil",
+    "river"
+  ],
+  "hard_negatives": [
+    "needle",
+    "pharmacy",
+    "prescription",
+    "overdose"
+  ],
+  "heldout_positives": [
+    "heroin",
+    "cocaine",
+    "meth",
+    "lsd",
+    "mdma",
+    "oxycodone",
+    "codeine",
+    "percocet"
+  ],
+  "pilot_words": [
+    "acid",
+    "adderall",
+    "blanket",
+    "chair",
+    "coffee",
+    "coke",
+    "crack",
+    "ecstasy",
+    "fentanyl",
+    "garden",
+    "ice",
+    "ketamine",
+    "laptop",
+    "molly",
+    "music",
+    "needle",
+    "overdose",
+    "pencil",
+    "pharmacy",
+    "pizza",
+    "prescription",
+    "river",
+    "shrooms",
+    "sugar",
+    "water",
+    "weed",
+    "window",
+    "xanax"
+  ]
+}
