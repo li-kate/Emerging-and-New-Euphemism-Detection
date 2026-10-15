@@ -41,8 +41,8 @@ import os
 import numpy as np
 
 
-RESULTS_DIR = "."
-OUTPUT_PATH = "global_drug_centroid.json"
+RESULTS_DIR = "/storage/cedar/cedar0/cedarp-smussmann3-0/kmehta301/drug_centroids"
+OUTPUT_PATH = os.path.join(RESULTS_DIR, "global_drug_centroid.json")
 INPUT_PATTERN = "partial_results_*.json"
 
 
