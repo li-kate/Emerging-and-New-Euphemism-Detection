@@ -1,3 +1,0 @@
-GoogleBooks/books.jsonl filter=lfs diff=lfs merge=lfs -text
-GoogleBooks/books.sqlite filter=lfs diff=lfs merge=lfs -text
-GoogleBooks/books.csv filter=lfs diff=lfs merge=lfs -text
