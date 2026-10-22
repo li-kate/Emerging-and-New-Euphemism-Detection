@@ -28,8 +28,8 @@ from transformers import AutoModel, AutoTokenizer
 # CONFIG — edit these constants before launching the job
 # ──────────────────────────────────────────────────────────────
 REDDIT_MONTHLY_DIR = "/storage/cedar/cedar0/cedarp-smussmann3-0/kmehta301/reddit_zst"
-SYNONYMS_FILE = "../../drug_synonyms.txt"
-SUBREDDIT_LIST_FILE = "../../drug_subreddit_list.txt"
+SYNONYMS_FILE = "../../drug_lists/drug_synonyms.txt"
+SUBREDDIT_LIST_FILE = "../../drug_lists/drug_subreddit_list.txt"
 # CHANGE THIS WHEN YOU RUN
 OUTPUT_DIR = "/storage/ice1/0/1/kli605/Emerging-and-New-Euphemism-Detection/cosine_similarity_drift/drug_centroid/checkpoints"
 MODEL_NAME = "bert-base-uncased"

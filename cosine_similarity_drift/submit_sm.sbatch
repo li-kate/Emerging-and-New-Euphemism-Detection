@@ -31,6 +31,6 @@ echo "Process Started at: $(date)"
 echo "============================================"
 
 # Unbuffered output for real-time logs
-python -u cosine_similarity_preprocess.py
+python -u similarity_matrix.py
 
 echo "Process Finished at: $(date)"
