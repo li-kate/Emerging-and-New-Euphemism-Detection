@@ -58,4 +58,4 @@ echo "Inspect logs in: logs_cosine_similarity/"
 
 # to run:
     # chmod +x submit_cosine_pipeline.sh
-    # ./submit_cosine_pipeline.sh
+    # ./submit_cs_pipeline.sh

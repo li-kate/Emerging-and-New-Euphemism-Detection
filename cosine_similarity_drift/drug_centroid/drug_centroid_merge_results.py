@@ -4,9 +4,11 @@ import os
 
 import numpy as np
 
-
+# CHANGE THESE 2 WHEN YOU RUN
 RESULTS_DIR = "/storage/ice1/0/1/kli605/Emerging-and-New-Euphemism-Detection/cosine_similarity_drift/drug_centroid/checkpoints"
-OUTPUT_PATH = os.path.join(RESULTS_DIR, "global_drug_centroid.json")
+OUTPUT_DIR = "/storage/ice1/0/1/kli605/Emerging-and-New-Euphemism-Detection/cosine_similarity_drift/drug_centroid/centroid_results"
+
+OUTPUT_PATH = os.path.join(OUTPUT_DIR, "global_drug_centroid.json")
 INPUT_PATTERN = "partial_results_*.json"
 
 

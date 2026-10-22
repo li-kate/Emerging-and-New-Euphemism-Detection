@@ -1,4 +1,5 @@
-"""Build contextual BERT centroids for known drug terms from Reddit comments.
+"""
+Build contextual BERT centroids for known drug terms from Reddit comments.
 
 Each SLURM array task streams one RC_*.zst file, finds EVERY whole-word
 occurrence of each target term, extracts a target-centered BERT window with up
@@ -27,8 +28,9 @@ from transformers import AutoModel, AutoTokenizer
 # CONFIG — edit these constants before launching the job
 # ──────────────────────────────────────────────────────────────
 REDDIT_MONTHLY_DIR = "/storage/cedar/cedar0/cedarp-smussmann3-0/kmehta301/reddit_zst"
-SYNONYMS_FILE = "drug_synonyms.txt"
-SUBREDDIT_LIST_FILE = "drug_subreddit_list.txt"
+SYNONYMS_FILE = "../../drug_synonyms.txt"
+SUBREDDIT_LIST_FILE = "../../drug_subreddit_list.txt"
+# CHANGE THIS WHEN YOU RUN
 OUTPUT_DIR = "/storage/ice1/0/1/kli605/Emerging-and-New-Euphemism-Detection/cosine_similarity_drift/drug_centroid/checkpoints"
 MODEL_NAME = "bert-base-uncased"
 BATCH_SIZE = 128

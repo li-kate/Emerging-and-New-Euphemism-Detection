@@ -1,3 +1,7 @@
+Change:
+    - in drug_centroid_embeddings.py, change OUTPUT_DIR
+    - in drug_centroid_merge_results.py, change RESULTS_DIR (should be equal to OUTPUT_DIR from previous file)
+
 To run:
     chmod +x submit_drug_centroid_pipeline.sh
     ./submit_drug_centroid_pipeline.sh

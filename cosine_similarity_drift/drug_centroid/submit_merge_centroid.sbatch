@@ -10,6 +10,6 @@
 cd "$SLURM_SUBMIT_DIR"
 
 module load anaconda3
-conda activate base
+conda activate based
 
 python -u drug_centroid_merge_results.py

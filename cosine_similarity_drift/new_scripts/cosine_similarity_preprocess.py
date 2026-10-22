@@ -46,7 +46,7 @@ FREQ_DIR = "../frequency_matrix"
 DRUG_CENTROID_PATH = (
     "../cosine_similarity_drift/drug_centroid/checkpoints/global_drug_centroid.json"
 )
-SUBREDDIT_LIST_FILE = "drug_subreddit_list.txt"
+SUBREDDIT_LIST_FILE = "../drug_subreddit_list.txt"
 OUTPUT_DIR = "./cosine_similarity_results"
 
 MODEL_NAME = "bert-base-uncased"
@@ -517,3 +517,4 @@ def main():
 
 
 if __name__ == "__main__":
+    main()

@@ -35,7 +35,7 @@ EMBED_JOB=$(sbatch --parsable \
         module load anaconda3
         source "$(conda info --base)/etc/profile.d/conda.sh"
         conda activate base
-        python -u drug_centroid_embeddings.py
+        python -u ../drug_centroid_embeddings.py
     ')
 
 echo "Submitted embedding array: $EMBED_JOB"
@@ -55,7 +55,7 @@ MERGE_JOB=$(sbatch --parsable \
         module load anaconda3
         source "$(conda info --base)/etc/profile.d/conda.sh"
         conda activate base
-        python -u drug_centroid_merge_results.py
+        python -u ../drug_centroid_merge_results.py
     ')
 
 echo "Submitted merge job: $MERGE_JOB"

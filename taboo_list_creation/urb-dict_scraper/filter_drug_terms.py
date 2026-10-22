@@ -29,7 +29,7 @@ from nltk.stem import WordNetLemmatizer
 # FILE SETTINGS
 
 DB_PATH = "urban-dict-drugs.db"
-DRUG_FILE = "drug_synonyms.txt"
+DRUG_FILE = "../../drug_synonyms.txt"
 OUTPUT_FILE = "filtered_drug_terms.json"
 
 # FILTER SETTINGS
