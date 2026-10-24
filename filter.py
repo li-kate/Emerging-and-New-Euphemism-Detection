@@ -11,6 +11,7 @@
 
 import re
 
+import numpy as np
 from nltk.corpus import stopwords
 
 # PREFILTER SETTINGS
@@ -236,6 +237,124 @@ def log_postfilter_counts(counts, total, min_freq=MIN_FREQ, samples=None):
     print(
         f"Removed freq <{min_freq} in all half-years: "
         f"{removed:,}"
+    )
+    print(
+        f"Kept terms:                       "
+        f"{total - removed:,}"
+    )
+
+    if samples:
+        print(f"\n--- sample of removed terms (examples only, {len(samples)} "
+              f"shown) ---")
+        print("  " + ", ".join(samples))
+
+
+def postfilter_per_half_year(
+    freq, words, min_freq=MIN_FREQ, sample_removed=0, rng=None
+):
+    """
+    Apply the postfilter independently within each half-year (leakage-safe).
+
+    Unlike :func:`postfilter`, which makes one keep/drop decision per word
+    using the maximum count across *all* half-years, this variant applies the
+    threshold to every cell on its own:
+
+      * A cell ``freq[h, w]`` below ``min_freq`` is **nulled** (set to 0).
+      * A word (column) is dropped only if it was nulled in *every*
+        half-year — i.e. it never reached ``min_freq`` in any single
+        half-year.
+
+    Because each cell's keep/null decision depends only on that half-year's
+    count, the result never carries information from future half-years into
+    an earlier one: a word that only becomes frequent in a later half-year
+    keeps its later cells but has its earlier (sub-threshold) cells zeroed.
+
+    Args:
+      freq            - 2D array of shape [half_years, words] with occurrence
+                        counts.
+      words           - sequence of word labels in column order; must line up
+                        with ``freq``'s columns.
+      min_freq        - minimum count a cell must reach in its own half-year
+                        to be kept (defaults to MIN_FREQ).
+      sample_removed  - if > 0, also return a uniform random sample of up to
+                        this many *dropped column* labels (words nulled in
+                        every half-year).
+      rng             - optional ``random.Random`` for a reproducible sample.
+
+    Returns:
+      freq_kept   - the per-cell-nulled matrix restricted to the kept columns.
+      kept_words  - list of the kept word labels, in the same order.
+      counts      - dict with ``low_frequency`` (number of dropped columns)
+                    and ``cells_nulled`` (number of sub-threshold cells zeroed
+                    among the *kept* columns).
+      samples     - list of up to ``sample_removed`` dropped column labels
+                    (empty when ``sample_removed == 0``).
+    """
+    import random as _random
+
+    # Per-cell keep mask: a cell survives only if its own half-year count
+    # reaches the threshold.
+    cell_keep = freq >= min_freq
+
+    # Null every sub-threshold cell. Work on a copy so the caller's array is
+    # left untouched.
+    nulled = np.where(cell_keep, freq, 0)
+
+    # A column survives if at least one of its cells survived.
+    col_keep = cell_keep.any(axis=0)
+    kept_words = [w for w, k in zip(words, col_keep) if k]
+
+    freq_kept = nulled[:, col_keep]
+
+    # Cells nulled among the kept columns (dropped columns are gone entirely,
+    # so they are not counted here).
+    cells_nulled = int((~cell_keep[:, col_keep]).sum())
+    counts = {
+        "low_frequency": int((~col_keep).sum()),
+        "cells_nulled": cells_nulled,
+    }
+
+    samples = []
+    if sample_removed > 0:
+        removed_words = [w for w, k in zip(words, col_keep) if not k]
+        r = rng or _random.Random()
+        if len(removed_words) <= sample_removed:
+            samples = list(removed_words)
+        else:
+            samples = r.sample(removed_words, sample_removed)
+
+    return freq_kept, kept_words, counts, samples
+
+
+def log_postfilter_per_half_year_counts(
+    counts, total, min_freq=MIN_FREQ, samples=None
+):
+    """
+    Print how many words/cells the per-half-year postfilter removed.
+
+    ``counts`` is the dict returned by :func:`postfilter_per_half_year`
+    (keys ``low_frequency`` and ``cells_nulled``). If ``samples`` is a list of
+    example dropped words, it is printed below the counts. Samples are
+    examples only, not an exhaustive list.
+    """
+    removed = counts["low_frequency"]
+    cells_nulled = counts.get("cells_nulled", 0)
+
+    print("\n========================================")
+    print("POSTFILTER (per half-year)")
+    print("========================================")
+
+    print(
+        f"Input terms:                      "
+        f"{total:,}"
+    )
+    print(
+        f"Removed freq <{min_freq} in every half-year: "
+        f"{removed:,}"
+    )
+    print(
+        f"Cells nulled (kept cols, freq <{min_freq}): "
+        f"{cells_nulled:,}"
     )
     print(
         f"Kept terms:                       "

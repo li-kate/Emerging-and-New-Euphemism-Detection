@@ -74,29 +74,62 @@ Rules, applied in order. A term is counted against the **first** filter it fails
 
 ### Postfilter (applied to the created matrix)
 
+The postfilter has three modes, chosen with `--postfilter-mode` and
+`--no-postfilter`. The default is **per-half-year**.
+
+**`per-half-year` (default, leakage-safe).** Apply `MIN_FREQ` to each cell
+independently instead of once per word over the whole timeline:
+
 | # | Rule | Setting | Log key |
 |---|---|---|---|
-| 4 | Remove a word if its frequency is below `MIN_FREQ` in **every** half-year (i.e. keep it if at least one half-year reaches `MIN_FREQ`) | `MIN_FREQ = 30` | `low_frequency` |
+| 4a | Null (set to 0) any cell whose count in its own half-year is below `MIN_FREQ` | `MIN_FREQ = 30` | `cells_nulled` |
+| 4b | After nulling, drop a word only if it was nulled in **every** half-year (never reached `MIN_FREQ` in any single half-year) | `MIN_FREQ = 30` | `low_frequency` |
+
+Because each cell's keep/null decision uses only that half-year's own count,
+the matrix never carries information from a future half-year into an earlier
+one. A word that only becomes frequent in a recent half-year keeps its recent
+cells but has its earlier, sub-threshold cells zeroed — so a reader of an
+early row never learns the word later became common. This is the fix for
+frequency leaking information from the future.
 
 ```python
 MIN_FREQ = 30
 
+def postfilter_per_half_year(freq, words, min_freq=MIN_FREQ):
+    """freq: array [half_years, words]. Null sub-threshold cells; drop a word
+    only if nulled in every half-year."""
+    cell_keep = freq >= min_freq
+    nulled = np.where(cell_keep, freq, 0)
+    col_keep = cell_keep.any(axis=0)
+    kept_words = [w for w, k in zip(words, col_keep) if k]
+    counts = {
+        "low_frequency": int((~col_keep).sum()),
+        "cells_nulled": int((~cell_keep[:, col_keep]).sum()),
+    }
+    return nulled[:, col_keep], kept_words, counts
+```
+
+**`global` (legacy).** One keep/drop decision per word, using its maximum
+count over all half-years. A word is kept if at least one half-year reaches
+`MIN_FREQ`; kept cells are left as-is (nothing nulled). This is simpler but
+not leakage-safe: the mere presence of a column reflects the whole timeline.
+
+| # | Rule | Setting | Log key |
+|---|---|---|---|
+| 4 | Remove a word if its frequency is below `MIN_FREQ` in **every** half-year | `MIN_FREQ = 30` | `low_frequency` |
+
+```python
 def postfilter(freq, words, min_freq=MIN_FREQ):
     """freq: array [half_years, words]. Keep words with max count >= min_freq."""
     keep = freq.max(axis=0) >= min_freq
     kept_words = [w for w, k in zip(words, keep) if k]
     counts = {"low_frequency": int((~keep).sum())}
     return freq[:, keep], kept_words, counts
-
-def log_postfilter_counts(counts, total, min_freq=MIN_FREQ):
-    removed = counts["low_frequency"]
-    print("\n========================================")
-    print("POSTFILTER")
-    print("========================================")
-    print(f"Input terms:                      {total:,}")
-    print(f"Removed freq <{min_freq} in all half-years: {removed:,}")
-    print(f"Kept terms:                       {total - removed:,}")
 ```
+
+**`--no-postfilter` (skip).** Keep every prefiltered word and every raw count
+— no cells nulled, no columns dropped. Use this to build an unfiltered matrix
+and defer the postfilter to a later step.
 
 ### Logging
 
@@ -109,7 +142,7 @@ def log_postfilter_counts(counts, total, min_freq=MIN_FREQ):
 - **Normalization:** the prefilter lowercases only for the stop-word check and keeps the original string. Use the same normalization as the frequency script's matching function, or "Molly" and "molly" can end up as separate columns.
 - **Stop-word list:** save the exact list used (`freq_stopwords.txt`) and record the NLTK version, so the filter is reproducible. Run the NLTK download once during setup rather than at import time, in case the environment has no network.
 - **Short DEA terms (check this):** a 4-character minimum removes 3-letter words such as "ice", "tea", and "pot", which have well-known drug senses. Any emerging euphemism of 3 letters or fewer would also never be examined, which is a recall loss in a recall-oriented filter. Before fixing the threshold, count how many words in the DEA euphemism list each filter removes (see checks). Options if many are lost: lower `MIN_TERM_LENGTH` to 3, or exempt a DEA allowlist from the prefilter (this protects only known words).
-- **Postfilter threshold:** keeping a word if any half-year reaches 30 does not penalize newly emerging words, which may only be frequent in recent half-years. Cells with fewer than 30 occurrences can still exist for kept words, so the hit script's minimum contexts per cell is still needed. The pilot selection thresholds (`MIN_FREQ`, `MIN_PERIODS` in the hit plan) are stricter and apply on top of this.
+- **Postfilter threshold:** dropping a word only when it is below 30 in *every* half-year does not penalize newly emerging words, which may only be frequent in recent half-years. In the default `per-half-year` mode, cells below 30 are nulled rather than left in place, so a kept word can still have zeroed (sub-threshold) cells — the hit script's minimum contexts per cell is still needed. The pilot selection thresholds (`MIN_FREQ`, `MIN_PERIODS` in the hit plan) are stricter and apply on top of this. In the `global` mode, sub-threshold cells of a kept word are left as-is.
 - **Totals:** filtering changes column sums, so they no longer equal total tokens. Save per-half-year total tokens before any filter and after all filters (`freq_totals.csv`) in case relative frequency is needed.
 
 ## 4. Files
@@ -174,7 +207,7 @@ TARGET_WORDS = set(words)
 - [ ] Add `SUBREDDIT_FILE` option (file or `None`) using the shared `load_subreddits` / `keep` module; log scope counts
 - [ ] Run prefilter on the term list; log counts per filter
 - [ ] Build the matrix for the kept terms
-- [ ] Run postfilter (`MIN_FREQ = 30` in at least one half-year); log counts
+- [ ] Run postfilter (default `per-half-year`: null cells `< MIN_FREQ = 30`, drop words nulled in every half-year; `--postfilter-mode global` for legacy; `--no-postfilter` to skip); log counts
 - [ ] Save `freq.npy`, label files, stop-word list, totals, and `freq_meta.json` (with filter settings and counts)
 - [ ] Run the consistency checks above
 - [ ] Load via the shared index dicts in the hit script

@@ -81,8 +81,10 @@ from filter import (
     MIN_TERM_LENGTH,
     STOP_WORDS,
     log_postfilter_counts,
+    log_postfilter_per_half_year_counts,
     log_prefilter_counts,
     postfilter,
+    postfilter_per_half_year,
     prefilter,
 )
 
@@ -441,7 +443,12 @@ def save_outputs(
             "min_term_length": MIN_TERM_LENGTH,
             "max_words": MAX_WORDS,
             "stopwords": "nltk english",
-            "min_freq_any_half_year": args.min_freq,
+            "postfilter": (
+                "none"
+                if getattr(args, "no_postfilter", False)
+                else getattr(args, "postfilter_mode", "per-half-year")
+            ),
+            "min_freq": args.min_freq,
         },
         "filter_counts": {**prefilter_counts, **postfilter_counts},
         "matching": (
@@ -610,6 +617,53 @@ def build_output_names(stem):
     }
 
 
+def apply_postfilter(freq, words, args, rng):
+    """
+    Run the postfilter selected by ``args`` on an assembled matrix.
+
+    Honors three options, shared by the single-process build and the merge
+    step so both paths behave identically:
+
+      * ``args.no_postfilter``: skip filtering entirely — every word and raw
+        count is kept, no cells nulled, no columns dropped.
+      * ``args.postfilter_mode == "per-half-year"`` (default): null any cell
+        below ``--min-freq`` and drop words that are below it in every
+        half-year. Leakage-safe: a word's early cells never reflect a later
+        half-year's frequency.
+      * ``args.postfilter_mode == "global"``: legacy single decision per word
+        using its maximum count across all half-years.
+
+    Returns ``(freq, words, postfilter_counts, postfilter_samples)`` with the
+    same shapes the two postfilter functions produce. When filtering is
+    skipped, ``postfilter_counts`` records zero removals.
+    """
+    total_before = len(words)
+
+    if args.no_postfilter:
+        logger.info("Postfilter: skipped (--no-postfilter).")
+        return freq, list(words), {"low_frequency": 0, "cells_nulled": 0}, []
+
+    if args.postfilter_mode == "per-half-year":
+        freq, words, counts, samples = postfilter_per_half_year(
+            freq, words, args.min_freq, args.sample_removed, rng
+        )
+        log_postfilter_per_half_year_counts(
+            counts, total_before, args.min_freq,
+            samples=samples if args.sample_removed else None,
+        )
+        return freq, words, counts, samples
+
+    # global (legacy)
+    freq, words, counts, samples = postfilter(
+        freq, words, args.min_freq, args.sample_removed, rng
+    )
+    log_postfilter_counts(
+        counts, total_before, args.min_freq,
+        samples=samples if args.sample_removed else None,
+    )
+    return freq, words, counts, samples
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Build, filter, and save the frequency matrix (filter.md).",
@@ -704,8 +758,25 @@ def main():
         "--min-freq",
         type=int,
         default=MIN_FREQ,
-        help="Postfilter: keep a word if it reaches this count in at least "
-        "one half-year.",
+        help="Postfilter threshold. per-half-year mode: null any cell below "
+        "this count and drop words below it in every half-year. global mode: "
+        "keep a word if it reaches this count in at least one half-year.",
+    )
+    filt.add_argument(
+        "--postfilter-mode",
+        choices=["per-half-year", "global"],
+        default="per-half-year",
+        help="per-half-year: apply --min-freq to each cell, nulling "
+        "sub-threshold cells and dropping words nulled in every half-year "
+        "(leakage-safe; a word's early cells never reflect later frequency). "
+        "global: one keep/drop decision per word using its max over all "
+        "half-years (legacy behavior).",
+    )
+    filt.add_argument(
+        "--no-postfilter",
+        action="store_true",
+        help="Skip the postfilter entirely: keep every prefiltered word and "
+        "every raw count (no cells nulled, no columns dropped).",
     )
 
     # --- Outputs ---
@@ -910,17 +981,12 @@ def main():
 
     dtype = np.int32 if args.dtype == "int32" else np.int64
 
-    # Assemble + postfilter.
+    # Assemble, then postfilter according to the chosen mode.
     freq, half_years, words = assemble_matrix(counts, half_years, dtype)
     logger.info("Pre-postfilter matrix: %s", freq.shape)
 
-    total_before = len(words)
-    freq, words, postfilter_counts, postfilter_samples = postfilter(
-        freq, words, args.min_freq, args.sample_removed, rng
-    )
-    log_postfilter_counts(
-        postfilter_counts, total_before, args.min_freq,
-        samples=postfilter_samples if args.sample_removed else None,
+    freq, words, postfilter_counts, postfilter_samples = apply_postfilter(
+        freq, words, args, rng
     )
 
     # Per-half-year filtered totals (sum over kept columns).

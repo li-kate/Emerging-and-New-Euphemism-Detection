@@ -38,11 +38,10 @@ from freq_matrix import (
     MIN_FREQ,
     PREFILTER_BUCKETS,
     SHARD_SUFFIX,
+    apply_postfilter,
     assemble_matrix,
     build_output_names,
-    log_postfilter_counts,
     log_prefilter_counts,
-    postfilter,
     save_outputs,
 )
 from subreddit_scope import load_subreddits, subreddit_hash
@@ -166,7 +165,24 @@ def main():
         "--min-freq",
         type=int,
         default=MIN_FREQ,
-        help="Postfilter: keep a word reaching this count in >=1 half-year.",
+        help="Postfilter threshold. per-half-year mode: null any cell below "
+        "this count and drop words below it in every half-year. global mode: "
+        "keep a word if it reaches this count in at least one half-year.",
+    )
+    parser.add_argument(
+        "--postfilter-mode",
+        choices=["per-half-year", "global"],
+        default="per-half-year",
+        help="per-half-year: apply --min-freq to each cell, nulling "
+        "sub-threshold cells and dropping words nulled in every half-year "
+        "(leakage-safe). global: one keep/drop decision per word using its "
+        "max over all half-years (legacy behavior).",
+    )
+    parser.add_argument(
+        "--no-postfilter",
+        action="store_true",
+        help="Skip the postfilter entirely: keep every merged word and raw "
+        "count (no cells nulled, no columns dropped).",
     )
 
     # Scope / metadata (recorded only; must match the map run).
@@ -242,13 +258,8 @@ def main():
     freq, half_years, words = assemble_matrix(counts, half_years, dtype)
     logger.info("Pre-postfilter matrix: %s", freq.shape)
 
-    total_before = len(words)
-    freq, words, postfilter_counts, postfilter_samples = postfilter(
-        freq, words, args.min_freq, args.sample_removed, rng
-    )
-    log_postfilter_counts(
-        postfilter_counts, total_before, args.min_freq,
-        samples=postfilter_samples if args.sample_removed else None,
+    freq, words, postfilter_counts, postfilter_samples = apply_postfilter(
+        freq, words, args, rng
     )
 
     totals_filtered = {h: int(freq[i].sum()) for i, h in enumerate(half_years)}
