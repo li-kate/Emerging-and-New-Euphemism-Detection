@@ -6,7 +6,6 @@
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
 #SBATCH --time=6:00:00
-#SBATCH --array=0-10
 #SBATCH --output=logs_drug_centroid/array_%A_%a.out
 
 # ============================================================================
