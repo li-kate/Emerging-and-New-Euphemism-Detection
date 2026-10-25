@@ -6,6 +6,7 @@
 #SBATCH --mem=8G
 #SBATCH --time=00:30:00
 #SBATCH --output=logs_cosine_similarity/merge_%j.out
+#SBATCH --error=logs_cosine_similarity/merge_%j.err
 
 set -euo pipefail
 

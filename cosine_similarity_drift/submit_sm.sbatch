@@ -7,6 +7,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --time=6:00:00
 #SBATCH --output=logs_cosine_similarity/array_%A_%a.out
+#SBATCH --error=logs_cosine_similarity/array_%A_%a.err
 
 set -euo pipefail
 
