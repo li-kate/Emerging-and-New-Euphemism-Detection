@@ -1,4 +1,3 @@
-
 import glob
 import io
 import json
@@ -17,7 +16,7 @@ from transformers import AutoModel, AutoTokenizer
 REDDIT_MONTHLY_DIR = "/storage/cedar/cedar0/cedarp-smussmann3-0/kmehta301/reddit_zst"
 SYNONYMS_FILE = "../../../drug_lists/drug_synonyms.txt"
 SUBREDDIT_LIST_FILE = "../../../drug_lists/drug_subreddit_list.txt"
-OUTPUT_DIR = "/storage/ice1/0/1/kli605/Emerging-and-New-Euphemism-Detection/cosine_similarity_drift/drug_centroid_test/checkpoints"
+OUTPUT_DIR = "./drug_centroid_test/checkpoints"
 MODEL_NAME = "bert-base-uncased"
 BATCH_SIZE = 128
 HIDDEN_DIM = 768
@@ -207,6 +206,7 @@ def prepare_target_window(
         add_special_tokens=False,
         return_offsets_mapping=True,
         truncation=False,
+        verbose=False,
     )
 
     offsets = encoded["offset_mapping"]
@@ -228,9 +228,22 @@ def prepare_target_window(
     )
 
     ids = encoded["input_ids"][left:right]
-    input_ids = tokenizer.build_inputs_with_special_tokens(ids)
-    target_local = [p - left + 1 for p in target_positions]
 
+    cls_id = tokenizer.cls_token_id
+    sep_id = tokenizer.sep_token_id
+    
+    if cls_id is None or sep_id is None:
+        raise RuntimeError("Tokenizer must define CLS and SEP token IDs")
+    
+    input_ids = [cls_id] + ids + [sep_id]
+
+    if len(input_ids) > tokenizer.model_max_length:
+        raise ValueError(
+            f"Target window has {len(input_ids)} tokens; "
+            f"maximum is {tokenizer.model_max_length}"
+        )
+    
+    target_local = [p - left + 1 for p in target_positions]
     return input_ids, target_local
 
 
