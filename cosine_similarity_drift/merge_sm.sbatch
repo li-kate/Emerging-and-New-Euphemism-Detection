@@ -14,4 +14,4 @@ cd "$SLURM_SUBMIT_DIR"
 module load anaconda3
 conda activate base
 
-python -u merge_cosine_similarity.py
+python -u merge_similarity_matrix.py

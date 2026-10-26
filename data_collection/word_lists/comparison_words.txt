@@ -1,4 +1,0 @@
-needle
-pharmacy
-prescription
-overdose
