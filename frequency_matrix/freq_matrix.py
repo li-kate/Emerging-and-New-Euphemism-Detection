@@ -448,7 +448,12 @@ def save_outputs(
                 if getattr(args, "no_postfilter", False)
                 else getattr(args, "postfilter_mode", "per-half-year")
             ),
-            "min_freq": args.min_freq,
+            # min_freq is the postfilter threshold; report it only when the
+            # postfilter actually ran. When --no-postfilter is set, no floor
+            # was applied, so a number here would be misleading.
+            "min_freq": (
+                None if getattr(args, "no_postfilter", False) else args.min_freq
+            ),
         },
         "filter_counts": {**prefilter_counts, **postfilter_counts},
         "matching": (
