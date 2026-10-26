@@ -10,6 +10,7 @@ mkdir -p logs_drug_centroid
 
 DUMP_DIR="/storage/cedar/cedar0/cedarp-smussmann3-0/kmehta301/reddit_zst"
 BATCH_SIZE=45
+START_TASK=45
 ACCOUNT="gts-smussmann3"
 QOS="embers"
 
@@ -85,7 +86,7 @@ submit_batch() {
         --cpus-per-task=4 \
         --mem=32G \
         --gres=gpu:1 \
-        --time=6:00:00 \
+        --time=3:00:00 \
         --array="${start}-${end}" \
         --mail-type=FAIL \
         --output="logs_drug_centroid/array_%A_%a.out" \
@@ -153,5 +154,5 @@ else
     echo "Batch size: $BATCH_SIZE"
     echo "Initial submission; remaining batches will be scheduled automatically."
 
-    submit_batch 0 "$NUM_FILES"
+    submit_batch "$START_TASK" "$NUM_FILES"
 fi

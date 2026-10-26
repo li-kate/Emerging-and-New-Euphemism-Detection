@@ -6,9 +6,9 @@ import numpy as np
 
 
 REDDIT_MONTHLY_DIR = "/storage/cedar/cedar0/cedarp-smussmann3-0/kmehta301/reddit_zst"
-SYNONYMS_FILE = "/storage/scratch1/8/arodrigues46/Emerging-and-New-Euphemism-Detection/drug_lists"
-RESULTS_DIR = "/storage/ice1/0/1/kli605/Emerging-and-New-Euphemism-Detection/cosine_similarity_drift/drug_centroid/checkpoints"
-OUTPUT_DIR = "/storage/ice1/0/1/kli605/Emerging-and-New-Euphemism-Detection/cosine_similarity_drift/drug_centroid/centroid_results"
+SYNONYMS_FILE = "/storage/scratch1/8/arodrigues46/Emerging-and-New-Euphemism-Detection/drug_lists/drug_synonyms.txt"
+RESULTS_DIR = "./drug_centroid_test/checkpoints"
+OUTPUT_DIR = "./drug_centroid_test/centroid_results"
 
 OUTPUT_PATH = os.path.join(OUTPUT_DIR, "global_drug_centroid.json")
 INPUT_PATTERN = "partial_results_*.json"
