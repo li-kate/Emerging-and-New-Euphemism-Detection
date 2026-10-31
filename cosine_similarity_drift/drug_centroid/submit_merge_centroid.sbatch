@@ -1,5 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=drug_merge
+#SBATCH --account=gts-smussmann3
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
@@ -13,3 +14,4 @@ module load anaconda3
 conda activate base
 
 python -u drug_centroid_merge_results.py
+        "

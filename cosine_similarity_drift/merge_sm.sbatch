@@ -1,10 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=cs_merge
+#SBATCH --account=gts-smussmann3
+#SBATCH --qos=embers
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=8G
 #SBATCH --time=00:30:00
+#SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --output=logs_cosine_similarity/merge_%j.out
 #SBATCH --error=logs_cosine_similarity/merge_%j.err
 
@@ -16,3 +19,4 @@ module load anaconda3
 conda activate base
 
 python -u merge_similarity_matrix.py
+

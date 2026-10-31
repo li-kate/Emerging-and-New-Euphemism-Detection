@@ -1,4 +1,3 @@
-
 """Merge per-half-year cosine similarity JSON shards into aligned matrices."""
 
 import csv
@@ -11,7 +10,7 @@ import numpy as np
 
 
 # CONFIGURATION
-FREQ_DIR = "/storage/cedar/cedar0/cedarp-smussmann3-0/kmehta301"
+FREQ_DIR = "/storage/cedar/cedar0/cedarp-smussmann3-0/kmehta301/freq_drug_subreddits_unfiltered"
 OUTPUT_DIR = "./cosine_similarity_results"
 SHARD_DIR = os.path.join(OUTPUT_DIR, "shards")
 

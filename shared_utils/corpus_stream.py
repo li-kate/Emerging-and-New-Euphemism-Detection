@@ -39,7 +39,7 @@ from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
-from subreddit_scope import keep
+from .subreddit_scope import keep
 
 logger = logging.getLogger(__name__)
 

@@ -1,11 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=cosine-similarity
+#SBATCH --account=gts-smussmann3
+#SBATCH --qos=embers
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
 #SBATCH --time=6:00:00
+#SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --output=logs_cosine_similarity/array_%A_%a.out
 #SBATCH --error=logs_cosine_similarity/array_%A_%a.err
 
@@ -32,6 +35,7 @@ echo "Process Started at: $(date)"
 echo "============================================"
 
 # Unbuffered output for real-time logs
+export PYTHONPATH="$SLURM_SUBMIT_DIR/..:$PYTHONPATH"
 python -u similarity_matrix.py
 
 echo "Process Finished at: $(date)"

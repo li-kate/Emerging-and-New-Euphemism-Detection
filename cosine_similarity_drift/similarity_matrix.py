@@ -7,8 +7,10 @@ import math
 import os
 import re
 import sys
+import time
 from collections import defaultdict
 from pathlib import Path
+
 import numpy as np
 
 # Local shared modules.
@@ -19,25 +21,23 @@ from shared_utils.subreddit_scope import load_subreddits, subreddit_hash
 # CONFIGURATION
 
 REDDIT_MONTHLY_DIR = "/storage/cedar/cedar0/cedarp-smussmann3-0/kmehta301/reddit_zst"
-FREQ_DIR = "/storage/cedar/cedar0/cedarp-smussmann3-0/kmehta301"
+FREQ_DIR = "/storage/cedar/cedar0/cedarp-smussmann3-0/kmehta301/freq_drug_subreddits_unfiltered"
 FREQ_STEM = "freq"
 SUBREDDIT_LIST_FILE = "../drug_lists/drug_subreddit_list.txt"
 
-CENTROID_RESULTS_DIR = "drug_centroid/centroid_results"
+CENTROID_RESULTS_DIR = "./drug_centroid/drug_centroid_test/centroid_results"
 DRUG_CENTROID_PATH = os.path.join(CENTROID_RESULTS_DIR, "global_drug_centroid.json")
 OUTPUT_DIR = "./cosine_similarity_results/shards"
+MONTHLY_OUTPUT_DIR = os.path.join(OUTPUT_DIR, "monthly")
 
 MODEL_NAME = "bert-base-uncased"
 CONTEXT_WORDPIECES = 64
 BATCH_SIZE = 128
 MIN_YEAR = 2015
-MAX_YEAR = 2015
+MAX_YEAR = 2016
 
-# Number of individual drug centroids to report for each word.
 TOP_K_DRUG_CENTROIDS = 3
-# Matches monthly Reddit dump names such as RC_2023-01.zst.
 MONTH_RE = re.compile(r"(\d{4})-(\d{2})")
-# SLURM array index selects a row from freq_half_years.csv.
 TASK_ID = int(os.environ.get("SLURM_ARRAY_TASK_ID", "0"))
 SHARD_SUFFIX = ".json"
 
@@ -47,6 +47,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 # LOADERS
 
 def read_csv_column(path, preferred_column):
@@ -54,7 +55,6 @@ def read_csv_column(path, preferred_column):
     with open(path, "r", encoding="utf-8-sig", newline="") as f:
         first_line = f.readline()
         f.seek(0)
-
         headers = next(csv.reader([first_line]), [])
 
         if preferred_column in headers:
@@ -68,6 +68,7 @@ def read_csv_column(path, preferred_column):
             for row in csv.reader(f)
             if row and row[0].strip()
         ]
+
 
 def load_frequency_inputs(freq_dir, stem="freq"):
     """Load the frequency matrix and its row/column labels."""
@@ -104,14 +105,10 @@ def load_frequency_inputs(freq_dir, stem="freq"):
         )
 
     if len(set(words)) != len(words):
-        raise ValueError(
-            "Frequency word list contains duplicate labels."
-        )
+        raise ValueError("Frequency word list contains duplicate labels.")
 
     if len(set(half_years)) != len(half_years):
-        raise ValueError(
-            "Frequency half-year list contains duplicate labels."
-        )
+        raise ValueError("Frequency half-year list contains duplicate labels.")
 
     logger.info(
         "Loaded frequency matrix %s with shape %s",
@@ -120,6 +117,7 @@ def load_frequency_inputs(freq_dir, stem="freq"):
     )
 
     return freq, half_years, words, freq_path
+
 
 def load_freq_meta(freq_dir, stem="freq"):
     """Load frequency-matrix metadata for the subreddit-scope check."""
@@ -138,7 +136,6 @@ def load_freq_meta(freq_dir, stem="freq"):
 def verify_scope(freq_meta, allowed, subreddit_file):
     """Abort if the subreddit scope differs from the frequency matrix."""
     freq_scope = freq_meta.get("scope", {})
-
     this_mode = "subreddits" if allowed is not None else "all"
     this_hash = subreddit_hash(allowed)
 
@@ -157,6 +154,7 @@ def verify_scope(freq_meta, allowed, subreddit_file):
 
     logger.info("Scope check passed (mode=%s).", this_mode)
 
+
 def file_sha256(path):
     """Return a reproducible SHA-256 fingerprint for an input file."""
     digest = hashlib.sha256()
@@ -166,6 +164,7 @@ def file_sha256(path):
             digest.update(chunk)
 
     return digest.hexdigest()
+
 
 def load_drug_centroid(path):
     """Load the precomputed global drug centroid."""
@@ -192,24 +191,26 @@ def load_drug_centroid(path):
 
     return centroid, payload
 
+
 def load_individual_centroids(path, hidden_size):
+    """Load and L2-normalize individual drug-term centroid vectors."""
     if not os.path.isfile(path):
         raise FileNotFoundError(
             f"Individual drug-centroid file not found: {path}"
         )
+
     with open(path, "r", encoding="utf-8") as f:
         payload = json.load(f)
+
     if not isinstance(payload, (dict, list)):
         raise ValueError(
             "Unsupported individual-centroid JSON format. "
             "Expected a JSON object or list."
         )
+
     if isinstance(payload, dict):
-        # This is the structure produced by the supplied merge script.
         if "term_centroids" in payload:
             container = payload["term_centroids"]
-
-        # Compatibility with a direct term-to-vector JSON object.
         elif any(
             key in payload
             for key in (
@@ -229,7 +230,6 @@ def load_individual_centroids(path, hidden_size):
                 )
                 if key in payload
             )
-
         else:
             container = payload
     else:
@@ -239,7 +239,6 @@ def load_individual_centroids(path, hidden_size):
 
     if isinstance(container, dict):
         for term, value in container.items():
-            # The actual term_centroids values are lists of floats.
             if isinstance(value, dict):
                 vector = (
                     value.get("centroid")
@@ -262,7 +261,6 @@ def load_individual_centroids(path, hidden_size):
                 or entry.get("name")
                 or entry.get("word")
             )
-
             vector = (
                 entry.get("centroid")
                 or entry.get("vector")
@@ -271,7 +269,6 @@ def load_individual_centroids(path, hidden_size):
 
             if term is not None and vector is not None:
                 raw_centroids[str(term)] = vector
-
     else:
         raise ValueError(
             "Individual centroid data must be a dictionary or list."
@@ -326,13 +323,13 @@ def load_individual_centroids(path, hidden_size):
         len(normalized_centroids),
         path,
     )
-
     logger.info(
         "Individual centroid terms: %s",
         ", ".join(sorted(normalized_centroids)),
     )
 
     return normalized_centroids, payload
+
 
 def get_half_year_files(all_paths, half_year):
     """Select the monthly Reddit dump files belonging to one half-year."""
@@ -348,20 +345,16 @@ def get_half_year_files(all_paths, half_year):
             f"{year}-{month:02d}" for month in range(7, 13)
         }
     else:
-        raise ValueError(
-            f"Invalid half-year label: {half_year!r}"
-        )
+        raise ValueError(f"Invalid half-year label: {half_year!r}")
 
     selected = []
 
     for path in all_paths:
         match = MONTH_RE.search(os.path.basename(path))
-
         if not match:
             continue
 
         month_key = f"{match.group(1)}-{match.group(2)}"
-
         if month_key in allowed_months:
             selected.append(path)
 
@@ -376,33 +369,67 @@ def get_half_year_files(all_paths, half_year):
     return selected
 
 
+def get_month_files(all_paths, month_key):
+    """Select RC/RS dump files for one calendar month, e.g. 2015-01."""
+    selected = []
+
+    for path in all_paths:
+        match = MONTH_RE.search(os.path.basename(path))
+        if match and f"{match.group(1)}-{match.group(2)}" == month_key:
+            selected.append(path)
+
+    selected = sorted(set(selected))
+
+    if not selected:
+        raise FileNotFoundError(
+            f"No Reddit dump files found for {month_key} "
+            f"in {REDDIT_MONTHLY_DIR}."
+        )
+
+    return selected
+
+
 # MODEL
 
 def load_model(model_name):
-    """Load the encoder used to create the drug centroids."""
+    """Load the BERT encoder and fast tokenizer used for drug centroids."""
     import torch
-    from transformers import AutoModel, AutoTokenizer
+    from transformers import AutoModel, BertTokenizerFast
 
     device = torch.device(
         "cuda" if torch.cuda.is_available() else "cpu"
     )
 
     logger.info("Loading %s on %s", model_name, device)
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_name,
-        use_fast=True,
-    )
+    tokenizer = BertTokenizerFast.from_pretrained(model_name)
 
     if not tokenizer.is_fast:
         raise RuntimeError(
-            "A fast tokenizer is required for character offset mappings."
+            f"Expected a fast tokenizer, got {type(tokenizer).__name__}"
         )
 
-    model = AutoModel.from_pretrained(model_name).to(device)
+    dtype = torch.float16 if device.type == "cuda" else None
+
+    model = AutoModel.from_pretrained(model_name, torch_dtype=dtype).to(device)
     model.eval()
 
+    logger.info(
+        "Loaded tokenizer class: %s (fast=%s)",
+        type(tokenizer).__name__,
+        tokenizer.is_fast,
+    )
+    logger.info(
+        "Tokenizer diagnostic: class=%s, is_fast=%s, "
+        "CLS=%s, SEP=%s, offset_mapping=%s",
+        type(tokenizer).__name__,
+        tokenizer.is_fast,
+        tokenizer.cls_token_id,
+        tokenizer.sep_token_id,
+        callable(getattr(tokenizer, "__call__", None)),
+    )
+
     return tokenizer, model, device
+
 
 # EMBEDDING AND AGGREGATION
 
@@ -420,14 +447,10 @@ def process_half_year(
     batch_size,
 ):
     """
-    Stream one half-year and aggregate contextual embeddings by target word.
+    Stream a month's Reddit records and aggregate target-word embeddings.
 
-    For each word, compute its mean contextual embedding for the half-year.
-    Compare that mean embedding against the global drug centroid and every
-    normalized individual drug-term centroid.
-
-    Only aggregate sums, counts, and similarity statistics are retained.
-    Individual occurrence embeddings are never written to disk.
+    The function name is retained for compatibility, but the caller supplies
+    only the files for one month. Raw occurrence embeddings are not saved.
     """
     import torch
 
@@ -437,7 +460,6 @@ def process_half_year(
     word_to_local = {
         word: i for i, word in enumerate(active_words)
     }
-
     hidden_size = int(model.config.hidden_size)
 
     if centroid.shape[0] != hidden_size:
@@ -450,32 +472,15 @@ def process_half_year(
         raise ValueError("No individual drug centroids were loaded.")
 
     centroid_norm = float(np.linalg.norm(centroid))
-
     individual_terms = list(individual_centroids.keys())
-
-    individual_vectors = np.stack(
-        [individual_centroids[term] for term in individual_terms]
-    ).astype(np.float64)
 
     embedding_sums = np.zeros(
         (len(active_words), hidden_size),
         dtype=np.float64,
     )
-
-    n_occurrences = np.zeros(
-        len(active_words),
-        dtype=np.int64,
-    )
-
-    cosine_sum = np.zeros(
-        len(active_words),
-        dtype=np.float64,
-    )
-
-    cosine_sq_sum = np.zeros(
-        len(active_words),
-        dtype=np.float64,
-    )
+    n_occurrences = np.zeros(len(active_words), dtype=np.int64)
+    cosine_sum = np.zeros(len(active_words), dtype=np.float64)
+    cosine_sq_sum = np.zeros(len(active_words), dtype=np.float64)
 
     pending_ids = []
     pending_targets = []
@@ -484,11 +489,17 @@ def process_half_year(
     occurrences_embedded = 0
     occurrences_without_wordpieces = 0
     records_in_period = 0
+    records_seen = 0
+    records_with_candidates = 0
+    started_at = time.monotonic()
+    last_progress_at = started_at
+    last_progress_records = 0
+    progress_interval_seconds = 60
+    progress_interval_records = 10_000
 
+    
     def flush_batch():
-        nonlocal pending_ids
-        nonlocal pending_targets
-        nonlocal occurrences_embedded
+        nonlocal pending_ids, pending_targets, occurrences_embedded
 
         if not pending_ids:
             return
@@ -498,87 +509,117 @@ def process_half_year(
             padding=True,
             return_tensors="pt",
         )
-
         padded = {
             key: value.to(device)
             for key, value in padded.items()
         }
 
         with torch.inference_mode():
-            hidden = model(**padded).last_hidden_state
+            hidden = model(**padded).last_hidden_state.float()
 
-        hidden = hidden.float().cpu()
+            # Target spans are [start, end), excluding the end position.
+            starts = torch.tensor(
+                [target[1] for target in pending_targets],
+                device=device,
+                dtype=torch.long,
+            )
+            ends = torch.tensor(
+                [target[2] for target in pending_targets],
+                device=device,
+                dtype=torch.long,
+            )
+            batch_idx = torch.arange(len(pending_targets), device=device)
 
-        for batch_i, (
-            local_i,
-            target_start,
-            target_end,
-        ) in enumerate(pending_targets):
-            vector = (
-                hidden[
-                    batch_i,
-                    target_start:target_end,
-                    :,
-                ]
-                .mean(dim=0)
-                .numpy()
-                .astype(np.float64)
+            # Prefix sums let us average each target span in parallel.
+            prefix = torch.cat(
+                [
+                    torch.zeros_like(hidden[:, :1, :]),
+                    hidden.cumsum(dim=1),
+                ],
+                dim=1,
             )
 
-            norm = float(np.linalg.norm(vector))
+            vectors = (
+                prefix[batch_idx, ends] - prefix[batch_idx, starts]
+            ) / (ends - starts).unsqueeze(1).to(hidden.dtype)
 
-            if norm == 0.0 or not math.isfinite(norm):
-                continue
+            vectors = vectors.cpu().numpy().astype(np.float64)
 
-            occurrence_cosine = float(
-                np.dot(vector, centroid)
-                / (norm * centroid_norm)
-            )
+        local_indices = np.asarray(
+            [target[0] for target in pending_targets],
+            dtype=np.intp,
+        )
 
-            embedding_sums[local_i] += vector
-            n_occurrences[local_i] += 1
+        norms = np.linalg.norm(vectors, axis=1)
+        valid = np.isfinite(norms) & (norms > 0)
 
-            cosine_sum[local_i] += occurrence_cosine
-            cosine_sq_sum[local_i] += (
-                occurrence_cosine * occurrence_cosine
-            )
+        if np.any(valid):
+            vectors = vectors[valid]
+            indices = local_indices[valid]
+            norms = norms[valid]
 
-            occurrences_embedded += 1
+            cosines = (
+                vectors @ centroid
+            ) / (norms * centroid_norm)
+
+            # add.at correctly accumulates repeated words in one batch.
+            np.add.at(embedding_sums, indices, vectors)
+            np.add.at(n_occurrences, indices, 1)
+            np.add.at(cosine_sum, indices, cosines)
+            np.add.at(cosine_sq_sum, indices, cosines * cosines)
+
+            occurrences_embedded += int(valid.sum())
 
         pending_ids = []
         pending_targets = []
 
-    for half_year, text in stream:
-        if half_year != target_half_year:
-            continue
 
+    for record_half_year, text in stream:
+        records_seen += 1
+        if record_half_year != target_half_year:
+            continue
         if not text:
             continue
 
         records_in_period += 1
-
-        # Use the shared frequency-matrix token spans for matching targets.
         candidate_spans = []
 
         for token, char_start, char_end in iter_token_spans(text):
             local_i = word_to_local.get(token.lower())
-
             if local_i is not None:
-                candidate_spans.append(
-                    (local_i, char_start, char_end)
-                )
+                candidate_spans.append((local_i, char_start, char_end))
 
         if not candidate_spans:
+            now = time.monotonic()
+            if (
+                now - last_progress_at >= progress_interval_seconds
+                or records_seen - last_progress_records >= progress_interval_records
+            ):
+                logger.info(
+                    "[%s] Progress: records_seen=%s, records_in_month=%s, "
+                    "records_with_matches=%s, occurrences_queued=%s, "
+                    "occurrences_embedded=%s, elapsed=%.1f min",
+                    target_half_year,
+                    f"{records_seen:,}",
+                    f"{records_in_period:,}",
+                    f"{records_with_candidates:,}",
+                    f"{occurrences_queued:,}",
+                    f"{occurrences_embedded:,}",
+                    (now - started_at) / 60.0,
+                )
+                last_progress_at = now
+                last_progress_records = records_seen
             continue
 
-        # Align each frequency-matrix token with its WordPiece span.
+        records_with_candidates += 1
         encoded = tokenizer(
             text,
             add_special_tokens=False,
             return_offsets_mapping=True,
             truncation=False,
+            return_attention_mask=False,
+            return_token_type_ids=False,
         )
-
         input_ids = encoded["input_ids"]
         offsets = encoded["offset_mapping"]
 
@@ -590,7 +631,6 @@ def process_half_year(
         wp_ends = [end for start, end in offsets]
 
         for local_i, char_start, char_end in candidate_spans:
-            # Find WordPieces whose character offsets overlap the target.
             wp_start = bisect.bisect_right(wp_ends, char_start)
             wp_end = bisect.bisect_left(wp_starts, char_end)
 
@@ -598,153 +638,73 @@ def process_half_year(
                 occurrences_without_wordpieces += 1
                 continue
 
-            window_start = max(
-                0,
-                wp_start - CONTEXT_WORDPIECES,
-            )
-
+            window_start = max(0, wp_start - CONTEXT_WORDPIECES)
             window_end = min(
                 len(input_ids),
                 wp_end + CONTEXT_WORDPIECES,
             )
-
             window_ids = input_ids[window_start:window_end]
 
-            prepared = tokenizer.prepare_for_model(
-                window_ids,
-                add_special_tokens=True,
-                truncation=False,
-                return_attention_mask=False,
-            )
+            cls_id = tokenizer.cls_token_id
+            sep_id = tokenizer.sep_token_id
+            if cls_id is None or sep_id is None:
+                raise RuntimeError(
+                    "BERT tokenizer is missing CLS or SEP token IDs."
+                )
 
-            # BERT places [CLS] at position 0.
+            prepared_ids = [cls_id] + window_ids + [sep_id]
             target_start = wp_start - window_start + 1
             target_end = wp_end - window_start + 1
 
             if (
                 target_start < 1
-                or target_end > len(prepared["input_ids"]) - 1
+                or target_end > len(prepared_ids) - 1
                 or target_start >= target_end
             ):
                 occurrences_without_wordpieces += 1
                 continue
 
-            pending_ids.append(prepared["input_ids"])
-
-            pending_targets.append(
-                (local_i, target_start, target_end)
-            )
-
+            pending_ids.append(prepared_ids)
+            pending_targets.append((local_i, target_start, target_end))
             occurrences_queued += 1
 
             if len(pending_ids) >= batch_size:
                 flush_batch()
 
+        now = time.monotonic()
+        if (
+            now - last_progress_at >= progress_interval_seconds
+            or records_seen - last_progress_records >= progress_interval_records
+        ):
+            logger.info(
+                "[%s] Progress: records_seen=%s, records_in_month=%s, "
+                "records_with_matches=%s, occurrences_queued=%s, "
+                "occurrences_embedded=%s, elapsed=%.1f min",
+                target_half_year,
+                f"{records_seen:,}",
+                f"{records_in_period:,}",
+                f"{records_with_candidates:,}",
+                f"{occurrences_queued:,}",
+                f"{occurrences_embedded:,}",
+                (now - started_at) / 60.0,
+            )
+            last_progress_at = now
+            last_progress_records = records_seen
+
     flush_batch()
 
-    # Produce one compact cell per active word.
-    cells = {}
-
-    for local_i, word in enumerate(active_words):
-        count = int(n_occurrences[local_i])
-        frequency = int(frequency_by_word[word])
-
-        if count == 0:
-            cells[word] = {
-                "n_occurrences": 0,
-                "cosine_mean_embedding": None,
-                "mean_occurrence_cosine": None,
-                "std_occurrence_cosine": None,
-                "frequency": frequency,
-                "coverage": 0.0 if frequency > 0 else None,
-                "mean_embedding_norm": None,
-                "top_k_drug_terms": [],
-            }
-
-            continue
-
-        # Mean contextual embedding for this word during this half-year.
-        mean_embedding = embedding_sums[local_i] / count
-        mean_norm = float(np.linalg.norm(mean_embedding))
-
-        if mean_norm > 0.0 and math.isfinite(mean_norm):
-            # Similarity of the mean contextual embedding to the global drug centroid.
-            cosine_mean_embedding = float(
-                np.dot(mean_embedding, centroid)
-                / (mean_norm * centroid_norm)
-            )
-
-            normalized_mean_embedding = mean_embedding / mean_norm
-
-            individual_scores = (
-                individual_vectors @ normalized_mean_embedding
-            )
-
-            # Rank by cosine similarity, highest first.
-            ranked_indices = np.argsort(individual_scores)[::-1]
-
-            k = min(top_k, len(individual_terms))
-            top_indices = ranked_indices[:k]
-
-            top_k_drug_terms = [
-                {
-                    "term": individual_terms[int(index)],
-                    "cosine_similarity": float(
-                        individual_scores[index]
-                    ),
-                }
-                for index in top_indices
-            ]
-
-        else:
-            cosine_mean_embedding = None
-            top_k_drug_terms = []
-
-        mean_occurrence_cosine = float(
-            cosine_sum[local_i] / count
-        )
-
-        # Population standard deviation, computed from running sums.
-        variance = (
-            cosine_sq_sum[local_i] / count
-            - mean_occurrence_cosine * mean_occurrence_cosine
-        )
-
-        std_occurrence_cosine = math.sqrt(
-            max(0.0, float(variance))
-        )
-
-        cells[word] = {
-            "n_occurrences": count,
-            "cosine_mean_embedding": cosine_mean_embedding,
-            "mean_occurrence_cosine": mean_occurrence_cosine,
-            "std_occurrence_cosine": std_occurrence_cosine,
-            "frequency": frequency,
-            "coverage": (
-                float(count / frequency)
-                if frequency > 0
-                else None
-            ),
-            "mean_embedding_norm": mean_norm,
-            "top_k_drug_terms": top_k_drug_terms,
-        }
-
     run_stats = {
+        "records_seen": records_seen,
         "records_in_period": records_in_period,
+        "records_with_candidates": records_with_candidates,
+        "elapsed_seconds": round(time.monotonic() - started_at, 2),
         "occurrences_queued": occurrences_queued,
         "occurrences_embedded": occurrences_embedded,
-        "occurrences_without_wordpieces": (
-            occurrences_without_wordpieces
-        ),
-        "words_with_embeddings": int(
-            (n_occurrences > 0).sum()
-        ),
+        "occurrences_without_wordpieces": occurrences_without_wordpieces,
+        "words_with_embeddings": int((n_occurrences > 0).sum()),
         "active_words": len(active_words),
         "individual_centroids_compared": len(individual_terms),
-        "top_k_drug_centroids": min(
-            top_k,
-            len(individual_terms),
-        ),
+        "top_k_drug_centroids": min(top_k, len(individual_terms)),
     }
 
     logger.info(
@@ -754,7 +714,14 @@ def process_half_year(
         f"{run_stats['words_with_embeddings']:,}",
     )
 
-    return cells, run_stats
+    aggregates = {
+        "embedding_sums": embedding_sums,
+        "n_occurrences": n_occurrences,
+        "cosine_sum": cosine_sum,
+        "cosine_sq_sum": cosine_sq_sum,
+    }
+    return None, run_stats, aggregates
+
 
 # SHARDS
 
@@ -779,13 +746,8 @@ def write_shard(
         shard_dir,
         f"cosine_{half_year}{SHARD_SUFFIX}",
     )
-
     tmp_path = final_path + ".tmp"
-
-    centroid_meta = centroid_payload.get(
-        "drug_centroid",
-        {},
-    )
+    centroid_meta = centroid_payload.get("drug_centroid", {})
 
     payload = {
         "shard_name": half_year,
@@ -806,13 +768,8 @@ def write_shard(
             "half-year against every L2-normalized individual drug-term "
             "centroid; rank by cosine similarity"
         ),
-        "top_k_drug_centroids": min(
-            top_k,
-            len(individual_centroids),
-        ),
-        "occurrence_cosine_std": (
-            "population standard deviation"
-        ),
+        "top_k_drug_centroids": min(top_k, len(individual_centroids)),
+        "occurrence_cosine_std": "population standard deviation",
         "scope": scope,
         "frequency_matrix": {
             "file": os.path.abspath(freq_path),
@@ -837,81 +794,127 @@ def write_shard(
     }
 
     with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(
-            payload,
-            f,
-            allow_nan=False,
-        )
+        json.dump(payload, f, allow_nan=False)
 
     os.replace(tmp_path, final_path)
-
     logger.info(
         "Wrote shard %s (%d word cells)",
         final_path,
         len(cells),
     )
-
     return final_path
+
+
+def write_monthly_shard(
+    month_key,
+    half_year,
+    active_words,
+    aggregates,
+    run_stats,
+    files,
+    scope,
+    freq_path,
+):
+    """Write sparse sufficient statistics for one month, for exact merging."""
+    os.makedirs(MONTHLY_OUTPUT_DIR, exist_ok=True)
+
+    counts = aggregates["n_occurrences"]
+    indices = np.flatnonzero(counts > 0).astype(np.int32)
+
+    npz_path = os.path.join(MONTHLY_OUTPUT_DIR, f"month_{month_key}.npz")
+    npz_tmp = npz_path + ".tmp"
+
+    with open(npz_tmp, "wb") as f:
+        np.savez_compressed(
+            f,
+            indices=indices,
+            embedding_sums=aggregates["embedding_sums"][indices].astype(
+                np.float64
+            ),
+            n_occurrences=counts[indices].astype(np.int64),
+            cosine_sum=aggregates["cosine_sum"][indices].astype(np.float64),
+            cosine_sq_sum=aggregates["cosine_sq_sum"][indices].astype(
+                np.float64
+            ),
+        )
+
+    os.replace(npz_tmp, npz_path)
+
+    metadata = {
+        "month": month_key,
+        "half_year": half_year,
+        "model_name": MODEL_NAME,
+        "embedding_dimension": int(
+            aggregates["embedding_sums"].shape[1]
+        ),
+        "context_wordpieces_each_side": CONTEXT_WORDPIECES,
+        "sufficient_statistics": [
+            "embedding_sums",
+            "n_occurrences",
+            "cosine_sum",
+            "cosine_sq_sum",
+        ],
+        "frequency_matrix": {
+            "file": os.path.abspath(freq_path),
+            "half_year": half_year,
+        },
+        "scope": scope,
+        "files": list(files),
+        "statistics": run_stats,
+        "active_words_with_occurrences": int(len(indices)),
+        "npz_file": os.path.basename(npz_path),
+    }
+
+    json_path = os.path.join(MONTHLY_OUTPUT_DIR, f"month_{month_key}.json")
+    tmp_path = json_path + ".tmp"
+
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, allow_nan=False, indent=2)
+
+    os.replace(tmp_path, json_path)
+
+    logger.info("Wrote monthly sufficient statistics: %s", npz_path)
+    logger.info("Wrote monthly metadata: %s", json_path)
+    return npz_path
+
 
 # MAIN
 
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # Load the frequency matrix and its labels.
     freq, half_years, all_words, freq_path = load_frequency_inputs(
         FREQ_DIR,
         FREQ_STEM,
     )
 
-    # if not 0 <= TASK_ID < len(half_years):
-    #     raise ValueError(
-    #         f"TASK_ID={TASK_ID} is out of range for "
-    #         f"{len(half_years)} half-years. Valid indices: "
-    #         f"0-{len(half_years) - 1}."
-    #     )
-
-    # target_half_year = half_years[TASK_ID]
-    # frequency_row = np.asarray(freq[TASK_ID])
-
-    """ Test only the first two half-years. """
-    TEST_HALF_YEARS = ["2015H1", "2015H2"]
-
-    selected_indices = [
-        i for i, half_year in enumerate(half_years)
-        if half_year in TEST_HALF_YEARS
+    # One SLURM array task per month from 2015-01 through 2016-12.
+    month_tasks = [
+        f"{year}-{month:02d}"
+        for year in range(MIN_YEAR, MAX_YEAR + 1)
+        for month in range(1, 13)
     ]
 
-    if len(selected_indices) != len(TEST_HALF_YEARS):
-        missing = set(TEST_HALF_YEARS) - set(half_years)
+    if not 0 <= TASK_ID < len(month_tasks):
         raise ValueError(
-            f"Missing test half-years from frequency axis: {sorted(missing)}"
+            f"TASK_ID={TASK_ID} is invalid. Valid task IDs: "
+            f"0-{len(month_tasks) - 1}."
         )
 
-    # Sort by the requested order, rather than assuming CSV row order.
-    selected_indices = [
-        next(i for i in selected_indices if half_years[i] == period)
-        for period in TEST_HALF_YEARS
-    ]
+    month_key = month_tasks[TASK_ID]
+    year, month = map(int, month_key.split("-"))
+    target_half_year = f"{year}H{1 if month <= 6 else 2}"
 
-    if not 0 <= TASK_ID < len(selected_indices):
+    if target_half_year not in half_years:
         raise ValueError(
-            f"TASK_ID={TASK_ID} is invalid for the two-period test."
+            f"Half-year {target_half_year} is missing from frequency axis."
         )
 
-    freq_row_idx = selected_indices[TASK_ID]
-    target_half_year = half_years[freq_row_idx]
+    freq_row_idx = half_years.index(target_half_year)
     frequency_row = np.asarray(freq[freq_row_idx])
 
-    """ End of section testing 2 half years """
-
-    # Keep only words with positive frequency in this half-year.
     active_indices = np.flatnonzero(frequency_row > 0)
-
-    active_words = [
-        all_words[i].lower()
-        for i in active_indices
-    ]
+    active_words = [all_words[i].lower() for i in active_indices]
 
     if len(set(active_words)) != len(active_words):
         raise ValueError(
@@ -923,56 +926,31 @@ def main():
         for i in active_indices
     }
 
+    logger.info("Month: %s", month_key)
     logger.info("Half-year: %s", target_half_year)
-    logger.info(
-        "Full vocabulary size: %s",
-        f"{len(all_words):,}",
-    )
-    logger.info(
-        "Positive-frequency words: %s",
-        f"{len(active_words):,}",
-    )
+    logger.info("Full vocabulary size: %s", f"{len(all_words):,}")
+    logger.info("Positive-frequency words: %s", f"{len(active_words):,}")
 
-    # Resolve all corpus files, then select the six months for this period.
     all_paths = resolve_inputs(
         input=None,
         input_dir=None,
         reddit_monthly_dir=REDDIT_MONTHLY_DIR,
     )
-
-    files = get_half_year_files(
-        all_paths,
-        target_half_year,
-    )
+    files = get_month_files(all_paths, month_key)
 
     logger.info(
-        "[%s] Selected %d Reddit dump files.",
+        "[%s / %s] Selected %d Reddit dump files.",
+        month_key,
         target_half_year,
         len(files),
     )
 
-    # Verify that the subreddit scope matches the frequency matrix.
     allowed = load_subreddits(SUBREDDIT_LIST_FILE)
+    freq_meta = load_freq_meta(FREQ_DIR, FREQ_STEM)
+    verify_scope(freq_meta, allowed, SUBREDDIT_LIST_FILE)
 
-    freq_meta = load_freq_meta(
-        FREQ_DIR,
-        FREQ_STEM,
-    )
-
-    verify_scope(
-        freq_meta,
-        allowed,
-        SUBREDDIT_LIST_FILE,
-    )
-
-    # Load the precomputed global drug centroid.
-    centroid, centroid_payload = load_drug_centroid(
-        DRUG_CENTROID_PATH
-    )
-
-    # Load the individual term centroids from the SAME JSON file.
+    centroid, centroid_payload = load_drug_centroid(DRUG_CENTROID_PATH)
     tokenizer, model, device = load_model(MODEL_NAME)
-
     hidden_size = int(model.config.hidden_size)
 
     if centroid.shape[0] != hidden_size:
@@ -986,9 +964,7 @@ def main():
         hidden_size=hidden_size,
     )
 
-    # Stream records using the shared hit/frequency-matrix utility.
     drop_counts = defaultdict(int)
-
     stream = stream_corpus(
         files,
         MIN_YEAR,
@@ -997,7 +973,7 @@ def main():
         drop_counts,
     )
 
-    cells, run_stats = process_half_year(
+    _, run_stats, aggregates = process_half_year(
         stream=stream,
         target_half_year=target_half_year,
         active_words=active_words,
@@ -1019,25 +995,19 @@ def main():
         "hash": subreddit_hash(allowed),
     }
 
-    output_path = write_shard(
-        shard_dir=OUTPUT_DIR,
+    output_path = write_monthly_shard(
+        month_key=month_key,
         half_year=target_half_year,
-        cells=cells,
+        active_words=active_words,
+        aggregates=aggregates,
         run_stats=run_stats,
         files=files,
         scope=scope,
         freq_path=freq_path,
-        centroid_path=DRUG_CENTROID_PATH,
-        centroid_payload=centroid_payload,
-        individual_centroids=individual_centroids,
-        top_k=TOP_K_DRUG_CENTROIDS,
-        model_name=MODEL_NAME,
     )
 
-    logger.info(
-        "Saved similarity shard: %s",
-        output_path,
-    )
+    logger.info("Saved monthly sufficient statistics: %s", output_path)
+
 
 if __name__ == "__main__":
     main()

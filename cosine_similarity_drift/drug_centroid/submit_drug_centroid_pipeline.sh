@@ -10,7 +10,7 @@ mkdir -p logs_drug_centroid
 
 DUMP_DIR="/storage/cedar/cedar0/cedarp-smussmann3-0/kmehta301/reddit_zst"
 BATCH_SIZE=45
-START_TASK=45
+START_TASK=90
 ACCOUNT="gts-smussmann3"
 QOS="embers"
 
