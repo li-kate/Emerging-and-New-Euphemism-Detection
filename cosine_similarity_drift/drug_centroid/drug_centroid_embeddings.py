@@ -3,6 +3,8 @@ import io
 import json
 import os
 import re
+import time
+from bisect import bisect_right
 from collections import defaultdict
 from collections.abc import Iterator
 from datetime import datetime, timezone
@@ -16,11 +18,16 @@ from transformers import AutoModel, AutoTokenizer
 REDDIT_MONTHLY_DIR = "/storage/cedar/cedar0/cedarp-smussmann3-0/kmehta301/reddit_zst"
 SYNONYMS_FILE = "/storage/scratch1/8/arodrigues46/Emerging-and-New-Euphemism-Detection/drug_lists/drug_synonyms.txt"
 SUBREDDIT_LIST_FILE = "/storage/scratch1/8/arodrigues46/Emerging-and-New-Euphemism-Detection/drug_lists/drug_subreddit_list.txt"
-OUTPUT_DIR = "./drug_centroid_test/checkpoints"
+OUTPUT_DIR = "./drug_centroid_hy/checkpoints"
 MODEL_NAME = "bert-base-uncased"
-BATCH_SIZE = 128
+
+# Performance settings. BATCH_SIZE remains unchanged.
+BATCH_SIZE = 256
+USE_MIXED_PRECISION = True
+PAD_TO_MULTIPLE_OF = 8
+
 HIDDEN_DIM = 768
-SAVE_EVERY = 20
+SAVE_EVERY = 100
 WORDPIECES_BEFORE = 64
 WORDPIECES_AFTER = 64
 
@@ -152,10 +159,10 @@ def process_line(obj: dict) -> dict | None:
     except (TypeError, ValueError, OverflowError, OSError):
         return None
 
-    return {
-        "text": text,
-        "timestamp_dt": timestamp_dt,
-    }
+    # Calculate the month once per record.
+    month = timestamp_dt.strftime("%Y-%m")
+
+    return {"text": text, "month": month}
 
 
 def stream_reddit_file(
@@ -195,12 +202,12 @@ def stream_reddit_file(
                         yield record
 
 
-def prepare_target_window(
+def prepare_sentence_windows(
     sentence: str,
-    char_start: int,
-    char_end: int,
+    spans: list[tuple[str, int, int]],
     tokenizer,
-):
+) -> list[dict]:
+    """Tokenize a sentence once, then prepare one BERT window per match."""
     encoded = tokenizer(
         sentence,
         add_special_tokens=False,
@@ -209,92 +216,142 @@ def prepare_target_window(
         verbose=False,
     )
 
+    token_ids = encoded["input_ids"]
     offsets = encoded["offset_mapping"]
-    target_positions = [
-        i
-        for i, (start, end) in enumerate(offsets)
-        if end > char_start and start < char_end
-    ]
 
-    if not target_positions:
-        return None
-
-    first_target = target_positions[0]
-    last_target = target_positions[-1]
-    left = max(0, first_target - WORDPIECES_BEFORE)
-    right = min(
-        len(encoded["input_ids"]),
-        last_target + 1 + WORDPIECES_AFTER,
-    )
-
-    ids = encoded["input_ids"][left:right]
+    # Token offsets are ordered by character position.
+    # Precompute token ends so bisect_right can locate the first token
+    # that could overlap each target occurrence.
+    token_ends = [end for _, end in offsets]
 
     cls_id = tokenizer.cls_token_id
     sep_id = tokenizer.sep_token_id
-    
+
     if cls_id is None or sep_id is None:
         raise RuntimeError("Tokenizer must define CLS and SEP token IDs")
-    
-    input_ids = [cls_id] + ids + [sep_id]
 
-    if len(input_ids) > tokenizer.model_max_length:
-        raise ValueError(
-            f"Target window has {len(input_ids)} tokens; "
-            f"maximum is {tokenizer.model_max_length}"
+    prepared = []
+
+    for word, char_start, char_end in spans:
+        # Find the first token whose end offset is greater than char_start.
+        first_possible = bisect_right(token_ends, char_start)
+
+        target_positions = []
+        token_index = first_possible
+
+        # Only inspect tokens that could overlap this target span.
+        while (
+            token_index < len(offsets)
+            and offsets[token_index][0] < char_end
+        ):
+            start, end = offsets[token_index]
+
+            if end > char_start:
+                target_positions.append(token_index)
+
+            token_index += 1
+
+        if not target_positions:
+            prepared.append({
+                "candidate": word,
+                "input_ids": None,
+                "target_positions": None,
+            })
+            continue
+
+        first_target = target_positions[0]
+        last_target = target_positions[-1]
+
+        left = max(0, first_target - WORDPIECES_BEFORE)
+        right = min(
+            len(token_ids),
+            last_target + 1 + WORDPIECES_AFTER,
         )
-    
-    target_local = [p - left + 1 for p in target_positions]
-    return input_ids, target_local
+
+        window_ids = token_ids[left:right]
+        input_ids = [cls_id] + window_ids + [sep_id]
+
+        if len(input_ids) > tokenizer.model_max_length:
+            raise ValueError(
+                f"Target window has {len(input_ids)} tokens; "
+                f"maximum is {tokenizer.model_max_length}"
+            )
+
+        target_local = [position - left + 1 for position in target_positions]
+
+        prepared.append({
+            "candidate": word,
+            "input_ids": input_ids,
+            "target_positions": target_local,
+        })
+
+    return prepared
 
 
 def get_batch_span_embeddings(batch_data, tokenizer, model, device):
-    prepared = [
-        prepare_target_window(
-            item["sentence"],
-            item["span"][0],
-            item["span"][1],
-            tokenizer,
-        )
-        for item in batch_data
-    ]
-
+    """Run BERT on already-tokenized target windows."""
     valid_indices = [
-        i for i, item in enumerate(prepared) if item is not None
+        i for i, item in enumerate(batch_data)
+        if item["input_ids"] is not None
     ]
     results = [None] * len(batch_data)
 
     if not valid_indices:
         return results
 
-    sequences = [prepared[i][0] for i in valid_indices]
+    sequences = [batch_data[i]["input_ids"] for i in valid_indices]
     max_len = max(len(ids) for ids in sequences)
-    pad_id = tokenizer.pad_token_id
 
+    if PAD_TO_MULTIPLE_OF:
+        max_len = min(
+            ((max_len + PAD_TO_MULTIPLE_OF - 1) // PAD_TO_MULTIPLE_OF)
+            * PAD_TO_MULTIPLE_OF,
+            tokenizer.model_max_length,
+        )
+
+    pad_id = tokenizer.pad_token_id
     if pad_id is None:
         raise RuntimeError("Tokenizer must define a pad_token_id")
 
     input_ids = torch.full(
-        (len(sequences), max_len), pad_id, dtype=torch.long
+        (len(sequences), max_len),
+        pad_id,
+        dtype=torch.long,
     )
     attention_mask = torch.zeros(
-        (len(sequences), max_len), dtype=torch.long
+        (len(sequences), max_len),
+        dtype=torch.long,
     )
 
     for row, ids in enumerate(sequences):
         input_ids[row, :len(ids)] = torch.tensor(ids, dtype=torch.long)
         attention_mask[row, :len(ids)] = 1
 
-    input_ids = input_ids.to(device)
-    attention_mask = attention_mask.to(device)
+    if device.type == "cuda":
+        input_ids = input_ids.pin_memory().to(device, non_blocking=True)
+        attention_mask = attention_mask.pin_memory().to(device, non_blocking=True)
+    else:
+        input_ids = input_ids.to(device)
+        attention_mask = attention_mask.to(device)
 
-    with torch.no_grad():
-        hidden = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-        ).last_hidden_state.cpu()
+    with torch.inference_mode():
+        if device.type == "cuda" and USE_MIXED_PRECISION:
+            with torch.autocast(device_type="cuda", dtype=torch.float16):
+                hidden = model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                ).last_hidden_state
+        else:
+            hidden = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            ).last_hidden_state
+
+    # Convert back to float32 before pooling/accumulation for stable sums.
+    hidden = hidden.float().cpu()
 
     for row, original_index in enumerate(valid_indices):
-        target_positions = prepared[original_index][1]
+        target_positions = batch_data[original_index]["target_positions"]
         results[original_index] = (
             hidden[row, target_positions].mean(dim=0).numpy()
         )
@@ -370,13 +427,23 @@ def main():
     if TASK_ID < 0:
         raise ValueError("TASK_ID must be >= 0")
 
+    run_start = time.perf_counter()
+    timings = {
+        "read_parse_filter_seconds": 0.0,
+        "matching_seconds": 0.0,
+        "tokenization_seconds": 0.0,
+        "model_batch_seconds": 0.0,
+        "checkpoint_seconds": 0.0,
+    }
+
     words = load_target_words(SYNONYMS_FILE)
     allowed_subreddits = load_allowed_subreddits(SUBREDDIT_LIST_FILE)
     automaton = build_matcher(words)
 
-    dump_files = sorted(
-        glob.glob(os.path.join(REDDIT_MONTHLY_DIR, "RC_*.zst"))
-        + glob.glob(os.path.join(REDDIT_MONTHLY_DIR, "RS_*.zst"))
+    # Preserve the same RC-then-RS ordering used by the SLURM task mapping.
+    dump_files = (
+        sorted(glob.glob(os.path.join(REDDIT_MONTHLY_DIR, "RC_*.zst")))
+        + sorted(glob.glob(os.path.join(REDDIT_MONTHLY_DIR, "RS_*.zst")))
     )
 
     if not dump_files:
@@ -401,6 +468,9 @@ def main():
 
     print(f"Task {TASK_ID}/{len(dump_files)-1}: {Path(target_file).name}")
     print(f"Output: {output_file}")
+    print(f"Batch size: {BATCH_SIZE}")
+    print(f"Checkpoint interval: {SAVE_EVERY} batches")
+    print(f"Mixed precision: {USE_MIXED_PRECISION and torch.cuda.is_available()}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Loading {MODEL_NAME} on {device}...")
@@ -437,16 +507,18 @@ def main():
     valid_record_index = 0
 
     def flush_batch(queue):
+        batch_start = time.perf_counter()
         embeddings = get_batch_span_embeddings(
             queue, tokenizer, model, device
         )
+        timings["model_batch_seconds"] += time.perf_counter() - batch_start
 
         for item, embedding in zip(queue, embeddings):
             if embedding is None:
                 stats["skipped_no_tokens"] += 1
                 continue
 
-            month = item["timestamp_dt"].strftime("%Y-%m")
+            month = item["month"]
             entry = candidate_slices[item["candidate"]][month]
             entry["sum_embedding"] += embedding.astype(
                 np.float64, copy=False
@@ -454,7 +526,20 @@ def main():
             entry["count"] += 1
             stats["embedded"] += 1
 
-    for record in stream_reddit_file(target_file, allowed_subreddits):
+    # Explicit next() calls let us measure time spent reading/decompressing,
+    # parsing JSON, filtering subreddits, and preparing valid records.
+    record_iterator = iter(stream_reddit_file(target_file, allowed_subreddits))
+
+    while True:
+        read_start = time.perf_counter()
+        try:
+            record = next(record_iterator)
+        except StopIteration:
+            break
+        timings["read_parse_filter_seconds"] += (
+            time.perf_counter() - read_start
+        )
+
         valid_record_index += 1
 
         if valid_record_index <= rows_to_skip:
@@ -462,47 +547,70 @@ def main():
 
         stats["valid_records_processed"] += 1
         sentence = record["text"]
+        record_month = record["month"]
+
+        matching_start = time.perf_counter()
         matches = find_all_spans(sentence, automaton)
+        timings["matching_seconds"] += time.perf_counter() - matching_start
 
         if matches:
             stats["records_with_matches"] += 1
+            stats["matches_found"] += len(matches)
 
-        for word, start, end in matches:
-            stats["matches_found"] += 1
-            batch_queue.append({
-                "sentence": sentence,
-                "span": (start, end),
-                "candidate": word,
-                "timestamp_dt": record["timestamp_dt"],
-            })
+            tokenization_start = time.perf_counter()
+            prepared_matches = prepare_sentence_windows(
+                sentence, matches, tokenizer
+            )
+            timings["tokenization_seconds"] += (
+                time.perf_counter() - tokenization_start
+            )
 
-            while len(batch_queue) >= BATCH_SIZE:
-                current_batch = batch_queue[:BATCH_SIZE]
-                del batch_queue[:BATCH_SIZE]
-                flush_batch(current_batch)
-                batches_since_save += 1
+            for prepared in prepared_matches:
+                if prepared["input_ids"] is None:
+                    stats["skipped_no_tokens"] += 1
+                    continue
+
+                batch_queue.append({
+                    "candidate": prepared["candidate"],
+                    "input_ids": prepared["input_ids"],
+                    "target_positions": prepared["target_positions"],
+                    "month": record_month,
+                })
+
+                while len(batch_queue) >= BATCH_SIZE:
+                    current_batch = batch_queue[:BATCH_SIZE]
+                    del batch_queue[:BATCH_SIZE]
+                    flush_batch(current_batch)
+                    batches_since_save += 1
 
         if batches_since_save >= SAVE_EVERY:
             if batch_queue:
                 flush_batch(batch_queue)
                 batch_queue = []
 
+            checkpoint_start = time.perf_counter()
             save_checkpoint(
                 checkpoint_file,
                 candidate_slices,
                 stats,
                 valid_record_index,
             )
+            timings["checkpoint_seconds"] += (
+                time.perf_counter() - checkpoint_start
+            )
             batches_since_save = 0
 
         if valid_record_index % 1_000_000 == 0:
+            elapsed = time.perf_counter() - run_start
             print(
                 f"Read {valid_record_index:,} valid records; "
                 f"matched {stats['matches_found']:,} occurrences; "
-                f"embedded {stats['embedded']:,}"
+                f"embedded {stats['embedded']:,}; "
+                f"elapsed {elapsed / 60:.1f} min"
             )
 
-    flush_batch(batch_queue)
+    if batch_queue:
+        flush_batch(batch_queue)
 
     output = {"data": {}, "stats": stats}
     for word, slices in candidate_slices.items():
@@ -535,6 +643,8 @@ def main():
         for month in slices
     })
 
+    total_elapsed = time.perf_counter() - run_start
+
     print("\n--- Task Statistics ---")
     print(f"Input file: {Path(target_file).name}")
     print(f"Valid records processed: {stats['valid_records_processed']:,}")
@@ -546,7 +656,16 @@ def main():
     print(f"Terms with embeddings: {terms_with_embeddings:,}")
     print(f"Terms without embeddings: {len(words) - terms_with_embeddings:,}")
     print(f"Months represented: {len(months):,}")
-    print(f"Month range: {months[0] if months else 'N/A'} to {months[-1] if months else 'N/A'}")
+    print(
+        f"Month range: {months[0] if months else 'N/A'} to "
+        f"{months[-1] if months else 'N/A'}"
+    )
+
+    print("\n--- Timing ---")
+    for name, seconds in timings.items():
+        print(f"{name}: {seconds / 60:.2f} minutes")
+    print(f"Total elapsed: {total_elapsed / 60:.2f} minutes")
+
     print(f"Saved results to: {output_file}")
 
 

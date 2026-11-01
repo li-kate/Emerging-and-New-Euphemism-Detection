@@ -1,16 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name=cosine-similarity
+#SBATCH --job-name=cosine-test
 #SBATCH --account=gts-smussmann3
-#SBATCH --qos=embers
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=6
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
-#SBATCH --time=6:00:00
+#SBATCH --time=8:00:00
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --output=logs_cosine_similarity/array_%A_%a.out
-#SBATCH --error=logs_cosine_similarity/array_%A_%a.err
 
 set -euo pipefail
 
