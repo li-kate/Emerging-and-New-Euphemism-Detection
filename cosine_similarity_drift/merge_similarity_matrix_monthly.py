@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """Merge monthly sparse sufficient statistics into half-year JSON shards."""
 
@@ -20,32 +21,56 @@ logger = logging.getLogger(__name__)
 
 MONTHLY_DIR = sm.MONTHLY_OUTPUT_DIR
 OUTPUT_DIR = sm.OUTPUT_DIR
-YEARS = range(sm.MIN_YEAR, sm.MAX_YEAR + 1)
+
+SKIP_HALF_YEARS = {
+    "2024H2",
+    "2026H2",
+}
 
 
 def sum_stat(metadata_list, key):
     return sum(
-        int(meta.get("statistics", {}).get(key, 0))
+        float(meta.get("statistics", {}).get(key, 0))
         for meta in metadata_list
     )
 
 
-def load_monthly_files(month_key, half_year, expected_scope_hash):
+def load_monthly_files(
+    month_key,
+    half_year,
+    expected_scope_hash,
+    expected_vocabulary_hash,
+):
+    """Load and validate one month's JSON metadata and NPZ arrays."""
+
     json_path = os.path.join(MONTHLY_DIR, f"month_{month_key}.json")
     npz_path = os.path.join(MONTHLY_DIR, f"month_{month_key}.npz")
 
     if not os.path.isfile(json_path) or not os.path.isfile(npz_path):
         raise FileNotFoundError(
-            f"Missing monthly output for {month_key}: expected {json_path} "
-            f"and {npz_path}."
+            f"Missing monthly output for {month_key}: expected "
+            f"{json_path} and {npz_path}."
         )
 
     with open(json_path, "r", encoding="utf-8") as f:
         metadata = json.load(f)
 
+    if metadata.get("month") != month_key:
+        raise ValueError(
+            f"{json_path} declares month={metadata.get('month')!r}."
+        )
+
     if metadata.get("half_year") != half_year:
         raise ValueError(
-            f"{json_path} declares half_year={metadata.get('half_year')!r}."
+            f"{json_path} declares half_year="
+            f"{metadata.get('half_year')!r}; expected {half_year!r}."
+        )
+
+    if metadata.get("centroid_half_year") != half_year:
+        raise ValueError(
+            f"{json_path} used centroid "
+            f"{metadata.get('centroid_half_year')!r}; "
+            f"expected {half_year!r}."
         )
 
     if metadata.get("model_name") != sm.MODEL_NAME:
@@ -53,6 +78,9 @@ def load_monthly_files(month_key, half_year, expected_scope_hash):
 
     if metadata.get("scope", {}).get("hash") != expected_scope_hash:
         raise ValueError(f"Subreddit scope mismatch in {json_path}.")
+
+    if metadata.get("vocabulary_sha256") != expected_vocabulary_hash:
+        raise ValueError(f"Vocabulary hash mismatch in {json_path}.")
 
     with np.load(npz_path) as data:
         arrays = {
@@ -71,22 +99,118 @@ def load_monthly_files(month_key, half_year, expected_scope_hash):
             ),
         }
 
-    lengths = {len(value) for value in arrays.values() if value.ndim == 1}
-    if len(lengths) > 1:
-        raise ValueError(f"Inconsistent sparse-array lengths in {npz_path}.")
+    indices = arrays["indices"]
+    embedding_sums = arrays["embedding_sums"]
 
-    if arrays["embedding_sums"].shape[0] != len(arrays["indices"]):
+    if indices.ndim != 1:
+        raise ValueError(f"Invalid indices shape in {npz_path}.")
+
+    if embedding_sums.ndim != 2:
+        raise ValueError(f"Invalid embedding_sums shape in {npz_path}.")
+
+    if embedding_sums.shape[0] != len(indices):
         raise ValueError(f"Embedding/index length mismatch in {npz_path}.")
+
+    for key in ("n_occurrences", "cosine_sum", "cosine_sq_sum"):
+        if arrays[key].ndim != 1 or len(arrays[key]) != len(indices):
+            raise ValueError(f"Invalid {key} shape in {npz_path}.")
+
+    if np.any(arrays["n_occurrences"] < 0):
+        raise ValueError(f"Negative occurrence count in {npz_path}.")
+
+    if not all(
+        np.isfinite(arrays[key]).all()
+        for key in ("embedding_sums", "cosine_sum", "cosine_sq_sum")
+    ):
+        raise ValueError(f"Non-finite values found in {npz_path}.")
 
     return metadata, arrays
 
 
-def merge_half_year(half_year, all_words, scope, centroid, centroid_payload):
-    month_numbers = range(1, 7) if half_year.endswith("H1") else range(7, 13)
+def write_half_year_shard(
+    half_year,
+    cells,
+    run_stats,
+    files,
+    scope,
+    vocabulary_hash,
+    vocabulary_size,
+    centroid_payload,
+):
+    """Write a half-year JSON shard for the matrix assembly stage."""
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    centroid_meta = centroid_payload.get("drug_centroid", {})
+
+    payload = {
+        "half_year": half_year,
+        "model_name": sm.MODEL_NAME,
+        "embedding_dimension": int(
+            len(centroid_meta.get("centroid", []))
+        ),
+        "similarity_target": "half-year drug centroid",
+        "centroid_half_year": half_year,
+        "occurrence_cosine_std": "population standard deviation",
+        "drug_centroid": {
+            "file": os.path.abspath(sm.DRUG_CENTROID_PATH),
+            "half_year": half_year,
+            "count": centroid_meta.get("count"),
+        },
+        "vocabulary_file": os.path.abspath(sm.VOCAB_FILE),
+        "vocabulary_size": int(vocabulary_size),
+        "vocabulary_sha256": vocabulary_hash,
+        "scope": scope,
+        "metrics": [
+            "n_occurrences",
+            "cosine_mean_embedding",
+            "std_occurrence_cosine",
+            "mean_embedding_norm",
+        ],
+        "statistics": run_stats,
+        "files": list(files),
+        "active_words_with_occurrences": len(cells),
+        "cells": cells,
+    }
+
+    output_path = os.path.join(
+        OUTPUT_DIR,
+        f"cosine_{half_year}.json",
+    )
+    temp_path = output_path + ".tmp"
+
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, allow_nan=False, indent=2)
+
+    os.replace(temp_path, output_path)
+
+    return output_path
+
+
+def merge_half_year(
+    half_year,
+    all_words,
+    vocabulary_hash,
+    scope,
+):
+    """Merge the six monthly shards for one half-year."""
+
+    centroid, centroid_payload = sm.load_drug_centroid(
+        sm.DRUG_CENTROID_PATH,
+        half_year,
+    )
+
     year = int(half_year[:4])
-    month_keys = [f"{year}-{month:02d}" for month in month_numbers]
+    month_numbers = (
+        range(1, 7) if half_year.endswith("H1") else range(7, 13)
+    )
+    month_keys = [
+        f"{year}-{month:02d}"
+        for month in month_numbers
+    ]
 
     metadata_list = []
+
     embedding_sums = {}
     n_occurrences = defaultdict(int)
     cosine_sum = defaultdict(float)
@@ -94,9 +218,10 @@ def merge_half_year(half_year, all_words, scope, centroid, centroid_payload):
 
     for month_key in month_keys:
         metadata, arrays = load_monthly_files(
-            month_key,
-            half_year,
-            scope["hash"],
+            month_key=month_key,
+            half_year=half_year,
+            expected_scope_hash=scope["hash"],
+            expected_vocabulary_hash=vocabulary_hash,
         )
         metadata_list.append(metadata)
 
@@ -131,6 +256,7 @@ def merge_half_year(half_year, all_words, scope, centroid, centroid_payload):
 
     for index in sorted(n_occurrences):
         count = int(n_occurrences[index])
+
         if count <= 0:
             continue
 
@@ -150,8 +276,8 @@ def merge_half_year(half_year, all_words, scope, centroid, centroid_payload):
         else:
             cosine_mean_embedding = None
 
-        # Used only to derive the variance; not written as an output metric.
-        mean_occurrence_cosine = float(cosine_sum[index] / count)
+        # Population standard deviation of occurrence-level cosine values.
+        mean_occurrence_cosine = cosine_sum[index] / count
         variance = (
             cosine_sq_sum[index] / count
             - mean_occurrence_cosine ** 2
@@ -167,29 +293,34 @@ def merge_half_year(half_year, all_words, scope, centroid, centroid_payload):
         }
 
     drop_counts = defaultdict(int)
+
     for metadata in metadata_list:
-        for key, value in metadata.get("statistics", {}).get(
-            "corpus_drop_counts", {}
-        ).items():
+        for key, value in metadata.get(
+            "statistics", {}
+        ).get("corpus_drop_counts", {}).items():
             drop_counts[key] += int(value)
 
     run_stats = {
-        "records_seen": sum_stat(metadata_list, "records_seen"),
-        "records_in_period": sum_stat(metadata_list, "records_in_period"),
-        "records_with_candidates": sum_stat(
-            metadata_list, "records_with_candidates"
+        "months_merged": month_keys,
+        "monthly_tasks_merged": len(metadata_list),
+        "files_seen": int(sum_stat(metadata_list, "files_seen")),
+        "files_completed": int(sum_stat(metadata_list, "files_completed")),
+        "records_seen": int(sum_stat(metadata_list, "records_seen")),
+        "records_with_matches": int(
+            sum_stat(metadata_list, "records_with_matches")
         ),
-        "occurrences_queued": sum_stat(metadata_list, "occurrences_queued"),
-        "occurrences_embedded": sum_stat(
-            metadata_list, "occurrences_embedded"
+        "occurrences_queued": int(
+            sum_stat(metadata_list, "occurrences_queued")
         ),
-        "occurrences_without_wordpieces": sum_stat(
-            metadata_list, "occurrences_without_wordpieces"
+        "occurrences_embedded": int(
+            sum_stat(metadata_list, "occurrences_embedded")
         ),
         "words_with_embeddings": len(cells),
-        "vocabulary_words": len(all_words),
+        "vocabulary_size": len(all_words),
+        "elapsed_seconds": round(
+            sum_stat(metadata_list, "elapsed_seconds"), 2
+        ),
         "corpus_drop_counts": dict(drop_counts),
-        "monthly_tasks_merged": len(metadata_list),
     }
 
     files = sorted({
@@ -198,20 +329,19 @@ def merge_half_year(half_year, all_words, scope, centroid, centroid_payload):
         for path in metadata.get("files", [])
     })
 
-    output_path = sm.write_shard(
-        shard_dir=OUTPUT_DIR,
+    output_path = write_half_year_shard(
         half_year=half_year,
         cells=cells,
         run_stats=run_stats,
         files=files,
         scope=scope,
-        centroid_path=sm.DRUG_CENTROID_PATH,
+        vocabulary_hash=vocabulary_hash,
+        vocabulary_size=len(all_words),
         centroid_payload=centroid_payload,
-        model_name=sm.MODEL_NAME,
     )
 
     logger.info(
-        "Merged %s from six months -> %s (%s words with occurrences)",
+        "Merged %s from six months -> %s (%s words)",
         half_year,
         output_path,
         f"{len(cells):,}",
@@ -221,9 +351,11 @@ def merge_half_year(half_year, all_words, scope, centroid, centroid_payload):
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    all_words = sm.load_vocabulary(sm.FREQ_DIR, sm.FREQ_STEM)
+    # similarity_matrix.load_vocabulary takes VOCAB_FILE as its only argument.
+    all_words, vocabulary_hash = sm.load_vocabulary(sm.VOCAB_FILE)
 
     allowed = sm.load_subreddits(sm.SUBREDDIT_LIST_FILE)
+
     if not allowed:
         raise ValueError(
             "The subreddit allowlist is empty. Check SUBREDDIT_LIST_FILE."
@@ -235,19 +367,36 @@ def main():
         "hash": sm.subreddit_hash(allowed),
     }
 
-    centroid, centroid_payload = sm.load_drug_centroid(
-        sm.DRUG_CENTROID_PATH
+    # Only process half-years for which a centroid was actually generated.
+    with open(sm.DRUG_CENTROID_PATH, "r", encoding="utf-8") as f:
+        centroid_data = json.load(f)
+
+    available_half_years = sorted(
+        half_year
+        for half_year in centroid_data.get("half_years", {})
+        if (
+            len(half_year) == 6
+            and half_year[:4].isdigit()
+            and sm.MIN_YEAR <= int(half_year[:4]) <= sm.MAX_YEAR
+            and half_year not in SKIP_HALF_YEARS
+        )
     )
 
-    for year in YEARS:
-        for half in (1, 2):
-            merge_half_year(
-                f"{year}H{half}",
-                all_words,
-                scope,
-                centroid,
-                centroid_payload,
-            )
+    if not available_half_years:
+        raise ValueError(
+            "No available half-year centroids fall within "
+            f"{sm.MIN_YEAR}-{sm.MAX_YEAR}."
+        )
+
+    logger.info("Half-years to merge: %s", available_half_years)
+
+    for half_year in available_half_years:
+        merge_half_year(
+            half_year=half_year,
+            all_words=all_words,
+            vocabulary_hash=vocabulary_hash,
+            scope=scope,
+        )
 
 
 if __name__ == "__main__":

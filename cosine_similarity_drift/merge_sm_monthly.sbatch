@@ -10,6 +10,11 @@
 #SBATCH --output=logs_cosine_similarity/merge_monthly_%j.out
 
 set -euo pipefail
-cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")}"
+cd "$SLURM_SUBMIT_DIR"
+
+module load anaconda3
+conda activate base
+
+export PYTHONPATH="$SLURM_SUBMIT_DIR/..:$PYTHONPATH"
 
 python merge_similarity_matrix_monthly.py

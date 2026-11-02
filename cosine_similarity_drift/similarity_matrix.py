@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Compute monthly Reddit contextual embeddings and cosine similarity to the
-global drug centroid.
+corresponding half-year drug centroid.
 
 Performance changes:
   * BERT inference batch size increased to 256.
@@ -57,9 +57,9 @@ VOCAB_FILE = os.path.join(FREQ_DIR, "freq_words.csv")
 
 SUBREDDIT_LIST_FILE = "/storage/scratch1/8/arodrigues46/Emerging-and-New-Euphemism-Detection/drug_lists/drug_subreddit_list.txt"
 
-CENTROID_RESULTS_DIR = "./drug_centroid/drug_centroid_test/centroid_results"
+CENTROID_RESULTS_DIR = "./drug_centroid/drug_centroid_hy/centroid_results"
 DRUG_CENTROID_PATH = os.path.join(
-    CENTROID_RESULTS_DIR, "global_drug_centroid.json"
+    CENTROID_RESULTS_DIR, "drug_centroids_by_half_year.json"
 )
 
 OUTPUT_DIR = "./cosine_similarity_results/shards"
@@ -79,7 +79,7 @@ PREPROCESS_WORKERS = 4
 PREPROCESS_QUEUE_MAX_BATCHES = 16
 
 MIN_YEAR = 2015
-MAX_YEAR = 2015
+MAX_YEAR = 2026
 
 MONTH_RE = re.compile(r"(\d{4})-(\d{2})")
 TASK_ID = int(os.environ.get("SLURM_ARRAY_TASK_ID", "0"))
@@ -152,29 +152,43 @@ def load_vocabulary(path):
     return words, digest.hexdigest()
 
 
-def load_drug_centroid(path):
-    """Load and validate the global drug centroid."""
+def load_drug_centroid(path, half_year):
+    """Load and validate the drug centroid for a specific half-year."""
     with open(path, "r", encoding="utf-8") as f:
         payload = json.load(f)
 
+    half_year_data = payload.get("half_years", {}).get(half_year)
+
+    if half_year_data is None:
+        available = sorted(payload.get("half_years", {}).keys())
+        raise ValueError(
+            f"No drug centroid found for {half_year}. "
+            f"Available half-years: {available}"
+        )
+
     try:
         centroid = np.asarray(
-            payload["drug_centroid"]["centroid"],
+            half_year_data["drug_centroid"]["centroid"],
             dtype=np.float64,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(
-            f"{path!r} must contain drug_centroid.centroid."
+            f"Missing or invalid drug centroid for {half_year}."
         ) from exc
 
     if centroid.ndim != 1 or not np.isfinite(centroid).all():
-        raise ValueError("Global drug centroid must be a finite 1-D vector.")
+        raise ValueError(
+            f"Drug centroid for {half_year} must be a finite 1-D vector."
+        )
 
     norm = float(np.linalg.norm(centroid))
-    if norm == 0.0:
-        raise ValueError("Global drug centroid has zero norm.")
 
-    return centroid, payload
+    if norm == 0.0:
+        raise ValueError(
+            f"Drug centroid for {half_year} has zero norm."
+        )
+
+    return centroid, half_year_data
 
 
 def get_month_files(all_paths, month_key):
@@ -197,10 +211,16 @@ def get_month_files(all_paths, month_key):
 
 
 def get_month_tasks():
+    with open(DRUG_CENTROID_PATH, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    available_half_years = set(payload["half_years"])
+
     return [
         f"{year}-{month:02d}"
         for year in range(MIN_YEAR, MAX_YEAR + 1)
         for month in range(1, 13)
+        if f"{year}H{1 if month <= 6 else 2}" in available_half_years
     ]
 
 
@@ -789,16 +809,14 @@ def write_monthly_shard(
             "cosine_sum",
             "cosine_sq_sum",
         ],
-        "similarity_target": "global drug centroid",
+        "similarity_target": "half-year drug centroid",
+        "centroid_half_year": half_year,
         "occurrence_cosine_std": "population standard deviation",
         "scope": scope,
         "drug_centroid": {
             "file": os.path.abspath(DRUG_CENTROID_PATH),
-            "metadata": {
-                key: value
-                for key, value in centroid_meta.items()
-                if key != "centroid"
-            },
+            "half_year": half_year,
+            "count": centroid_meta.get("count"),
         },
         "files": list(files),
         "statistics": run_stats,
@@ -874,7 +892,7 @@ def main():
     )
 
     allowed = load_subreddits(SUBREDDIT_LIST_FILE)
-    if allowed is None:
+    if not allowed:
         raise ValueError(
             "The subreddit allowlist loader returned None. "
             "Refusing to process the unrestricted corpus."
@@ -887,7 +905,8 @@ def main():
     }
 
     centroid, centroid_payload = load_drug_centroid(
-        DRUG_CENTROID_PATH
+        DRUG_CENTROID_PATH,
+        half_year,
     )
 
     # process_month_parallel starts the CPU workers first, then initializes
