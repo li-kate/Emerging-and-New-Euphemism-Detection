@@ -39,11 +39,11 @@ set -euo pipefail
 : "${FREQ_DIR:?}"
 : "${FREQ_STEM:?}"
 : "${DEA_FILE:?}"
-: "${PILOT_FILE:?}"
 : "${OUT_DIR:?}"
 : "${SHARD_DIR:?}"
 : "${STEM:?}"
 : "${MODEL_NAME:?}"
+: "${START_YEAR:?}"
 : "${BATCH_SIZE:?}"
 : "${PY_DEPS:?}"
 : "${BATCH_MAX:?}"
@@ -51,9 +51,6 @@ set -euo pipefail
 : "${NUM_BATCHES:?}"
 : "${CONTROLLER:?}"
 : "${MONTHS_ARG:?}"
-: "${SAMPLE_SEED:?}"
-# May legitimately be empty; default so set -u is happy.
-SAMPLE_ARGS="${SAMPLE_ARGS:-}"
 
 # This controller runs either on the submit host (batch 0, from the pipeline
 # script) or on a compute node (later batches, as a chained job). Run sbatch
@@ -97,14 +94,13 @@ MAP_JOB=$(sbatch --parsable \
             --freq-dir '$FREQ_DIR' \
             --freq-stem '$FREQ_STEM' \
             --dea-file '$DEA_FILE' \
-            --pilot-file '$PILOT_FILE' \
             --shard-dir '$SHARD_DIR' \
             --shard-index \"\$SLURM_ARRAY_TASK_ID\" \
             --months $MONTHS_ARG \
             --model-name '$MODEL_NAME' \
+            --start-year $START_YEAR \
             --batch-size $BATCH_SIZE \
-            --fp16 \
-            $SAMPLE_ARGS
+            --fp16
     ")
 
 echo "Batch $((BATCH_INDEX + 1))/$NUM_BATCHES: map array $MAP_JOB (kept-month indices $ARRAY_SPEC)"
@@ -151,8 +147,7 @@ else
                 --freq-dir '$FREQ_DIR' \
                 --freq-stem '$FREQ_STEM' \
                 --out-dir '$OUT_DIR' \
-                --stem '$STEM' \
-                --sample-seed $SAMPLE_SEED
+                --stem '$STEM'
         ")
     echo "  final batch — submitted merge: $MERGE_JOB (after $MAP_JOB)"
 fi

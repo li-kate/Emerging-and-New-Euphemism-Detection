@@ -10,8 +10,10 @@ set -euo pipefail
 #      sums the shards into the summary table + matrices aligned to the
 #      frequency matrix.
 #
-# The pilot config (pilot_words.json) must already exist — it is built
-# separately and consumed by every map task.
+# This is the MATRIX-ONLY pipeline: it builds the hit matrix and nothing else.
+# The pilot per-context table and the manual spot-check context sample are
+# separate experiments with their own pipelines (submit_pilot_hits_pipeline.sh,
+# submit_sample_contexts_pipeline.sh).
 #
 # Submit-cap aware (like submit_freq_matrix_pipeline.sh). The cluster QOS caps
 # how many jobs a user may have in the queue at once, and a dependent job is
@@ -33,8 +35,7 @@ set -euo pipefail
 # frequency matrix.
 #
 # PREREQUISITES: the frequency matrix must already be built (freq_dir below),
-# since it defines the target words + denominator and its scope hash is checked;
-# and pilot_words.json must already exist (built separately).
+# since it defines the target words + denominator and its scope hash is checked.
 #
 # to run:
 #   chmod +x submit_hit_matrix_pipeline.sh _hit_batch_controller.sh
@@ -55,23 +56,13 @@ SUBREDDIT_FILE="drug_subreddit_list.txt"      # must match the frequency build
 FREQ_DIR="freq_drug_subreddits_unfiltered"               # existing frequency matrix
 FREQ_STEM="freq"
 DEA_FILE="../../data_collection/word_lists/drug_synonyms.txt"
-PILOT_FILE="pilot_words.json"
 OUT_DIR="hits_drug_subreddits"
 SHARD_DIR="${OUT_DIR}/shards"
 STEM="hits"
 
-MODEL_NAME="bert-base-uncased"
+MODEL_NAME="../BERT_model_reddit"
+START_YEAR=2019
 BATCH_SIZE=64
-
-# Optional per-half-year context sampling for manual spot-checking
-# (hit_matrix_plan.md 8). Set SAMPLE_WORD to a target word to keep a random
-# sample of up to SAMPLE_SIZE of its full contexts per half-year; the map tasks
-# write the sample into each shard and the merge unions them into
-# ${OUT_DIR}/${STEM}_sample.json. Leave SAMPLE_WORD empty to disable (default).
-#   SAMPLE_WORD=molly ./submit_hit_matrix_pipeline.sh
-SAMPLE_WORD="${SAMPLE_WORD:-}"
-SAMPLE_SIZE="${SAMPLE_SIZE:-1000}"
-SAMPLE_SEED="${SAMPLE_SEED:-0}"
 
 # QOS submit cap: the MOST jobs this user may have in the queue at once
 # (running + pending). One array task counts as one queued job, so an array
@@ -95,12 +86,6 @@ if [[ ! -f "${FREQ_DIR}/${FREQ_STEM}_words.csv" || ! -f "${FREQ_DIR}/${FREQ_STEM
     echo "       Build it first with submit_freq_matrix_pipeline.sh."
     exit 1
 fi
-if [[ ! -f "$PILOT_FILE" ]]; then
-    echo "ERROR: pilot config not found: $PILOT_FILE"
-    echo "       Build it first (pilot_creation.py) before running this pipeline."
-    exit 1
-fi
-
 # --- Months to score = dump months that are IN the frequency matrix ----------
 # The frequency matrix was built on a specific scope and year range; its
 # freq_half_years.csv lists exactly the half-years it covers. Scoring a month
@@ -178,14 +163,6 @@ rm -f "$SHARD_DIR"/*.part.json "$SHARD_DIR"/*.part.json.tmp 2>/dev/null || true
 # turns a batch's array range into the matching slice of this list.
 MONTHS_ARG="${months[*]}"
 
-# Optional sampling flags, passed to every map task only when SAMPLE_WORD is set.
-SAMPLE_ARGS=""
-if [[ -n "$SAMPLE_WORD" ]]; then
-    SAMPLE_ARGS="--sample-word '$SAMPLE_WORD' --sample-size $SAMPLE_SIZE --sample-seed $SAMPLE_SEED"
-    echo "Sampling up to $SAMPLE_SIZE contexts per half-year for word '$SAMPLE_WORD' (seed $SAMPLE_SEED)."
-    echo "  -> unioned sample will be written to ${OUT_DIR}/${STEM}_sample.json"
-fi
-
 # --- Map: self-chaining batches of <= (MAX_SUBMIT - 1) month tasks -----------
 # A dependency only delays when a job *runs* — a dependent job is still
 # *submitted* immediately and still counts against the submit cap. So we cannot
@@ -216,10 +193,9 @@ fi
 
 # Export everything the controller needs so each chained invocation is
 # self-contained (it runs on a compute node with only these in its env).
-export DUMP_DIR SUBREDDIT_FILE FREQ_DIR FREQ_STEM DEA_FILE PILOT_FILE
-export OUT_DIR SHARD_DIR STEM MODEL_NAME BATCH_SIZE PY_DEPS
+export DUMP_DIR SUBREDDIT_FILE FREQ_DIR FREQ_STEM DEA_FILE
+export OUT_DIR SHARD_DIR STEM MODEL_NAME START_YEAR BATCH_SIZE PY_DEPS
 export BATCH_MAX NUM_MONTHS NUM_BATCHES CONTROLLER MONTHS_ARG
-export SAMPLE_ARGS SAMPLE_SEED
 
 # Kick off batch 0. The controller submits the batch array, then chains the
 # next controller invocation (or the merge) after it.

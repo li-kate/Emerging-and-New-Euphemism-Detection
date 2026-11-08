@@ -4,13 +4,18 @@ into the final summary table and matrices described in ``hit_matrix_plan.md``
 sections 7 and 8.
 
 ``hit_matrix.py`` (one SLURM array task per month) writes one ``*.part.json``
-shard holding running per (half_year, word) counts plus per-context pilot rows.
-This script sums the cells across all months, concatenates the pilot rows,
-and writes the **raw hit matrix** (counts + diagnostics) plus the frequency
-denominator — but NOT the hit *rate*. Hit rates are left for downstream
-analysis, which can compute ``hits_k / frequency`` directly and experiment
-with different reliability thresholds (the old ``--min-contexts``) without
-re-running the merge. Outputs:
+shard holding running per (half_year, word) counts. This script sums the cells
+across all months and writes the **raw hit matrix** (counts + diagnostics)
+plus the frequency denominator — but NOT the hit *rate*. Hit rates are left for
+downstream analysis, which can compute ``hits_k / frequency`` directly and
+experiment with different reliability thresholds (the old ``--min-contexts``)
+without re-running the merge.
+
+This merge is **matrix-only**, mirroring the matrix-only ``hit_matrix.py``. The
+per-context pilot table and the manual-spot-check word sample are produced by
+their own experiment pipelines (``pilot_hits.py`` / ``merge_pilot_hits.py`` and
+``sample_contexts.py`` / ``merge_sample_contexts.py``), so a plain matrix merge
+never has to know about them. Outputs:
 
   * ``<stem>_summary.csv`` — one row per (half_year, word): ``frequency``,
     ``n_scored``, ``hits_k`` for each k, ``min_rank``, ``mean_log_rank``,
@@ -20,11 +25,6 @@ re-running the merge. Outputs:
     k, plus ``mean_log_rank`` / ``min_rank`` / ``mean_soft`` matrices, all
     aligned EXACTLY to the frequency matrix (same half-years, same words, same
     order). No rate matrices are written.
-  * ``<stem>_pilot.csv`` — the per-context pilot table.
-  * ``<stem>_sample.json`` — ONLY when the map tasks were run with
-    ``--sample-word``: a random sample of that word's full contexts per
-    half-year, unioned across all month shards (see ``merge_word_sample``).
-    For manual spot-checking; not produced otherwise.
   * ``<stem>_meta.json`` — scope, DEA, k list, and the sanity-check results.
 
 The frequency matrix is still loaded, for three non-rate purposes: the matrix
@@ -52,13 +52,12 @@ import json
 import logging
 import math
 import os
-import random
 from collections import defaultdict
 from itertools import pairwise
 
 import numpy as np
 import pandas as pd
-from hit_matrix import KS, SHARD_SUFFIX
+from hit_matrix_core import KS, SHARD_SUFFIX
 
 logging.basicConfig(
     level=logging.INFO,
@@ -114,7 +113,6 @@ def merge_shards(shard_files):
 
     Returns:
       cells       - dict[(half_year, word)] -> merged running counts
-      pilot_rows  - concatenated list of per-context pilot rows
       drop_counts - summed record drop reasons
       ctx_drops   - summed context-construction drop reasons
       scopes      - list of per-shard scope dicts (checked for agreement)
@@ -123,7 +121,6 @@ def merge_shards(shard_files):
                     kept/dropped counts; checked for agreement on min_freq)
     """
     cells = defaultdict(_empty_cell)
-    pilot_rows = []
     drop_counts = defaultdict(int)
     ctx_drops = defaultdict(int)
     scopes, dea_metas, target_sels = [], [], []
@@ -151,8 +148,6 @@ def merge_shards(shard_files):
             for k in KS:
                 dst[f"hits_{k}"] += src[f"hits_{k}"]
 
-        pilot_rows.extend(shard.get("pilot_rows", []))
-
         for reason, c in shard.get("drop_counts", {}).items():
             drop_counts[reason] += c
         for reason, c in shard.get("dropped_contexts", {}).items():
@@ -168,111 +163,7 @@ def merge_shards(shard_files):
                     i, len(shard_files), os.path.basename(path),
                     f"{len(cells):,}")
 
-    return (cells, pilot_rows, drop_counts, ctx_drops, scopes, dea_metas,
-            target_sels)
-
-
-# ============================================================================
-# WORD SAMPLE MERGE (per-half-year random contexts, manual spot-check)
-# ============================================================================
-
-
-def merge_word_sample(shard_files, seed=0):
-    """
-    Union each shard's per-half-year ``word_sample`` into one sample per
-    half-year, spanning all months.
-
-    ``hit_matrix.py --sample-word`` keeps, in each month shard, a uniform
-    reservoir of up to ``k`` contexts for the chosen word per half-year, along
-    with ``n_seen`` (how many contexts that month's half-year actually had).
-    A half-year is split across the month shards (e.g. 2015H1 = Jan–Jun 2015),
-    so the shards must be combined to get one sample for the whole half-year.
-
-    The union is itself a (near) uniform size-``k`` sample of the pooled
-    contexts. A shard's reservoir is a uniform sample of that shard's
-    ``n_seen`` contexts, so each of its ``r`` sampled items stands in for
-    ``n_i / r`` of the pooled stream. To draw ``k`` items from the pool so that
-    each original context has roughly equal probability, every candidate item
-    is given weight ``w = n_i / r`` and we take a weighted random sample of
-    size ``k`` without replacement across all candidates for the half-year.
-
-    This is done with Efraimidis–Spirakis A-Res weighted reservoir sampling:
-    assign each item the key ``u ** (1 / w)`` with ``u`` uniform in (0, 1), and
-    keep the ``k`` items with the largest keys. A shard contributing ``n_i`` of
-    the ``N = sum n_i`` total contexts then wins about ``n_i / N`` of the
-    slots. It is exact when every shard's reservoir is unsaturated
-    (``n_i <= k``, so no information was lost at the map step) and an unbiased
-    approximation otherwise — the standard limit of merging fixed-size
-    reservoirs without the discarded items.
-
-    Returns ``None`` if no shard carried a ``word_sample`` (i.e. the map array
-    did not use ``--sample-word``). Otherwise returns
-    ``{"word", "k", "seed", "samples": {hy: [records]}, "n_seen": {hy: total}}``.
-    """
-    rng = random.Random(seed)
-
-    word = None
-    k = None
-    # Per-half-year list of (key, record): key is the A-Res weighted key; we
-    # keep the top-k keys at the end.
-    candidates = defaultdict(list)
-    n_seen_total = defaultdict(int)
-    any_sample = False
-
-    for path in shard_files:
-        with open(path, encoding="utf-8") as f:
-            shard = json.load(f)
-        ws = shard.get("word_sample")
-        if not ws:
-            continue
-        any_sample = True
-
-        if word is None:
-            word = ws.get("word")
-            k = ws.get("k")
-        else:
-            if ws.get("word") != word:
-                raise SystemExit(
-                    f"Shards disagree on --sample-word "
-                    f"({word!r} vs {ws.get('word')!r} in {path}). All months "
-                    f"must sample the same word."
-                )
-            if ws.get("k") != k:
-                raise SystemExit(
-                    f"Shards disagree on --sample-size (k={k} vs "
-                    f"{ws.get('k')} in {path}). All months must use the same "
-                    f"sample size."
-                )
-
-        shard_seen = ws.get("n_seen", {})
-        for hy, records in ws.get("samples", {}).items():
-            if not records:
-                continue
-            n_i = int(shard_seen.get(hy, len(records)))
-            n_seen_total[hy] += n_i
-            # Each sampled item represents n_i / r of the shard's contexts.
-            w = n_i / len(records)
-            for rec in records:
-                # A-Res key; larger weight -> key closer to 1 in expectation.
-                key = rng.random() ** (1.0 / w) if w > 0 else 0.0
-                candidates[hy].append((key, rec))
-
-    if not any_sample:
-        return None
-
-    samples = {}
-    for hy, items in candidates.items():
-        # Keep the k items with the largest keys (weighted sample w/o replacement).
-        items.sort(key=lambda t: t[0], reverse=True)
-        samples[hy] = [rec for _key, rec in items[:k]]
-
-    return {
-        "word": word,
-        "k": k,
-        "seed": seed,
-        "samples": samples,
-        "n_seen": dict(n_seen_total),
-    }
+    return (cells, drop_counts, ctx_drops, scopes, dea_metas, target_sels)
 
 
 # ============================================================================
@@ -458,11 +349,6 @@ def main():
     parser.add_argument("--freq-stem", default="freq")
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--stem", default="hits")
-    parser.add_argument(
-        "--sample-seed", type=int, default=0,
-        help="Seed for merging the per-half-year word-sample reservoirs "
-        "(only used if the map shards carry a --sample-word sample).",
-    )
     parser.add_argument("--version", default="unversioned")
     args = parser.parse_args()
 
@@ -472,7 +358,7 @@ def main():
 
     shard_files = find_shards(args.shard_dir)
     logger.info("Found %d shard(s) in %s", len(shard_files), args.shard_dir)
-    (cells, pilot_rows, drop_counts, ctx_drops, scopes, dea_metas,
+    (cells, drop_counts, ctx_drops, scopes, dea_metas,
      target_sels) = merge_shards(shard_files)
     if not cells:
         logger.error("No cells after merging shards. Check the map outputs.")
@@ -520,30 +406,6 @@ def main():
 
     save_matrices(args.out_dir, args.stem, summary, freq, eligible)
 
-    # Pilot table.
-    pilot_df = pd.DataFrame(
-        pilot_rows,
-        columns=["word", "half_year", "context_id", "best_rank", "soft_score"],
-    )
-    pilot_path = os.path.join(args.out_dir, f"{args.stem}_pilot.csv")
-    pilot_df.to_csv(pilot_path, index=False)
-    logger.info("Wrote pilot table %s (%d rows)", pilot_path, len(pilot_df))
-
-    # Optional: unioned per-half-year word sample (only if map used --sample-word).
-    sample_file = None
-    word_sample = merge_word_sample(shard_files, seed=args.sample_seed)
-    if word_sample is not None:
-        sample_file = f"{args.stem}_sample.json"
-        sample_path = os.path.join(args.out_dir, sample_file)
-        with open(sample_path, "w", encoding="utf-8") as f:
-            json.dump(word_sample, f, indent=2, ensure_ascii=False)
-        n_kept = sum(len(v) for v in word_sample["samples"].values())
-        logger.info(
-            "Wrote word sample %s: word=%r, %d contexts across %d half-year(s).",
-            sample_path, word_sample["word"], n_kept,
-            len(word_sample["samples"]),
-        )
-
     findings = run_sanity_checks(summary, freq)
 
     meta = {
@@ -563,20 +425,12 @@ def main():
         "record_drop_counts": dict(drop_counts),
         "context_drop_counts": dict(ctx_drops),
         "sanity_checks": findings,
-        # Only present when the map array ran with --sample-word.
-        "word_sample": (
-            {"word": word_sample["word"], "k": word_sample["k"],
-             "file": sample_file}
-            if word_sample is not None else None
-        ),
         "files": {
             "summary": f"{args.stem}_summary.csv",
-            "pilot": f"{args.stem}_pilot.csv",
             "hits_k": [f"{args.stem}_hits_{k}.npy" for k in KS],
             "mean_log_rank": f"{args.stem}_mean_log_rank.npy",
             "min_rank": f"{args.stem}_min_rank.npy",
             "mean_soft": f"{args.stem}_mean_soft.npy",
-            **({"sample": sample_file} if sample_file else {}),
         },
     }
     meta_path = os.path.join(args.out_dir, f"{args.stem}_meta.json")
