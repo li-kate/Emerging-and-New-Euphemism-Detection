@@ -210,6 +210,20 @@ def _parse_record(obj, start_year, end_year, allowed):
     return (half_year_label(dt), body), None
 
 
+# Decompression errors that mean the .zst file itself is unreadable (broken
+# frame header, truncated download, not actually zstd). We import the concrete
+# zstandard error lazily inside _open_zst, but keep a module-level tuple of the
+# exception types stream_corpus should treat as "this file is corrupt" so one
+# bad month never aborts the whole task. OSError covers truncated reads.
+CORRUPT_FILE_ERRORS: tuple[type[Exception], ...] = (OSError,)
+try:  # extend with the real zstd error when the package is importable
+    from zstandard import ZstdError as _ZstdError
+
+    CORRUPT_FILE_ERRORS = (_ZstdError, OSError)
+except ImportError:
+    pass
+
+
 def _open_zst(path):
     """Open a .zst Reddit dump as a decoded text stream."""
     import zstandard as zstd
@@ -240,6 +254,7 @@ def stream_corpus(
     end_year,
     allowed,
     drop_counts,
+    file_status=None,
 ) -> Iterator[tuple[str, str]]:
     """
     Stream ``(half_year, text)`` pairs from one or more corpus files.
@@ -247,30 +262,68 @@ def stream_corpus(
     ``drop_counts`` is a dict that is updated in place with the number of
     records dropped by each reason (subreddit, empty, year, bad_timestamp,
     parse_error) so the scope can be logged.
+
+    ``file_status`` (optional) is a dict updated in place to record which input
+    files were read in full vs. failed to decompress. It is filled with two
+    lists:
+
+      file_status["succeeded"] - paths streamed to the end without error.
+      file_status["failed"]    - dicts {"path", "error", "n_read"} for files
+                                 that raised a decompression/read error
+                                 (e.g. a broken or truncated .zst).
+
+    A file that raises is skipped rather than aborting the whole task, so a
+    single corrupt month does not kill the others. Any records already yielded
+    from that file before the break are still counted, so the caller MUST treat
+    a failed month as incomplete/untrustworthy (that is why the month is flagged
+    in the metadata), not as a clean partial count.
     """
+    if file_status is not None:
+        file_status.setdefault("succeeded", [])
+        file_status.setdefault("failed", [])
+
     for path in paths:
         logger.info("Streaming %s", path)
         n_read = 0
-        for line in _iter_lines(path):
-            line = line.strip()
-            if not line:
-                continue
-            n_read += 1
-            try:
-                obj = _json_loads(line)
-            except ValueError:
-                drop_counts["parse_error"] += 1
-                continue
+        try:
+            for line in _iter_lines(path):
+                line = line.strip()
+                if not line:
+                    continue
+                n_read += 1
+                try:
+                    obj = _json_loads(line)
+                except ValueError:
+                    drop_counts["parse_error"] += 1
+                    continue
 
-            parsed, reason = _parse_record(obj, start_year, end_year, allowed)
-            if parsed is None:
-                drop_counts[reason] += 1
-                continue
-            yield parsed
+                parsed, reason = _parse_record(
+                    obj, start_year, end_year, allowed
+                )
+                if parsed is None:
+                    drop_counts[reason] += 1
+                    continue
+                yield parsed
 
-            if n_read % 5_000_000 == 0:
-                logger.info("  %s: read %s", path, f"{n_read:,}")
+                if n_read % 5_000_000 == 0:
+                    logger.info("  %s: read %s", path, f"{n_read:,}")
+        except CORRUPT_FILE_ERRORS as exc:
+            # Broken/truncated/invalid .zst (e.g. "Unknown frame descriptor").
+            # Record it and move on instead of crashing the whole task.
+            logger.error(
+                "  %s: FAILED after %s record(s): %s: %s",
+                path, f"{n_read:,}", type(exc).__name__, exc,
+            )
+            drop_counts["corrupt_file"] += 1
+            if file_status is not None:
+                file_status["failed"].append(
+                    {"path": path, "error": f"{type(exc).__name__}: {exc}",
+                     "n_read": n_read}
+                )
+            continue
         logger.info("  %s: done (%s read)", path, f"{n_read:,}")
+        if file_status is not None:
+            file_status["succeeded"].append(path)
 
 
 # ============================================================================
@@ -395,6 +448,7 @@ def save_outputs(
     args,
     names,
     filter_samples=None,
+    month_status=None,
 ):
     """Write the matrix, labels, stop-word list, totals, and metadata."""
     os.makedirs(out_dir, exist_ok=True)
@@ -464,6 +518,12 @@ def save_outputs(
         "year_range": [args.start_year, args.end_year],
         "files": names,
     }
+    if month_status is not None:
+        # Which months were read in full vs. failed (e.g. a broken/truncated
+        # .zst that raised "Unknown frame descriptor"). A failed month's partial
+        # counts, if any, are included in the matrix but the month is flagged
+        # here as incomplete so it can be re-run and re-merged.
+        meta["month_status"] = month_status
     if filter_samples:
         # Examples of removed terms per filter bucket (not exhaustive, and —
         # in the merged/parallel case — pooled from per-shard samples rather
@@ -494,6 +554,7 @@ def write_shard(
     files,
     shard_name=None,
     prefilter_samples=None,
+    file_status=None,
 ):
     """
     Write one map task's partial counts to ``<shard_dir>/<name>.part.json``.
@@ -503,6 +564,11 @@ def write_shard(
     merge step globs ``*.part.json``, so the name only has to be unique per
     task.
 
+    ``file_status`` (optional) is the per-file read result from
+    ``stream_corpus`` ({"succeeded": [...], "failed": [...]}). It is recorded in
+    the shard so the merge step can report which months failed to decompress.
+    A shard with any failed file is marked ``"month_ok": False``.
+
     Written atomically (temp file then rename) so a crashed task never leaves
     a half-written shard that the merge step would silently read.
     """
@@ -511,6 +577,12 @@ def write_shard(
     name = f"{stem}{SHARD_SUFFIX}"
     final_path = os.path.join(shard_dir, name)
     tmp_path = final_path + ".tmp"
+
+    status = file_status or {}
+    failed = list(status.get("failed", []))
+    succeeded = list(status.get("succeeded", []))
+    # A month is OK only if it had at least one input file and none failed.
+    month_ok = bool(files) and not failed
 
     payload = {
         "shard_index": shard_index,
@@ -523,6 +595,10 @@ def write_shard(
         "half_years": sorted(half_years),
         "drop_counts": dict(drop_counts),
         "files": list(files),
+        # Per-file read result so the merge can report failed months.
+        "month_ok": month_ok,
+        "files_succeeded": succeeded,
+        "files_failed": failed,
     }
 
     with open(tmp_path, "w", encoding="utf-8") as f:
@@ -530,10 +606,12 @@ def write_shard(
     os.replace(tmp_path, final_path)
 
     logger.info(
-        "Wrote shard %s (%s terms, %s files)",
+        "Wrote shard %s (%s terms, %s files, month_ok=%s%s)",
         final_path,
         f"{len(counts):,}",
         len(files),
+        month_ok,
+        f", {len(failed)} FAILED file(s)" if failed else "",
     )
     return final_path
 
@@ -576,6 +654,50 @@ def group_by_month(paths):
         groups[key].append(path)
     # Sort file lists within each month for deterministic order.
     return {k: sorted(groups[k]) for k in sorted(groups)}
+
+
+def build_month_status(file_status, months):
+    """
+    Summarize per-file read results (from ``stream_corpus``) by month.
+
+    ``file_status`` is ``{"succeeded": [paths], "failed": [{"path", ...}]}``.
+    ``months`` is ``{month_key: [files]}`` from ``group_by_month``. A month is
+    "failed" if any of its files failed to decompress, else "succeeded".
+
+    Returns a dict suitable for ``freq_meta.json``:
+
+      {
+        "succeeded": [month_key, ...],        # sorted
+        "failed":    [month_key, ...],        # sorted
+        "failed_detail": [{"path", "error", "n_read"}, ...],
+        "n_succeeded": int,
+        "n_failed": int,
+      }
+
+    Used by the single-process build directly, and mirrored by the merge step
+    which aggregates the same fields across shards.
+    """
+    failed_paths = {f["path"] for f in file_status.get("failed", [])}
+    file_to_month = {}
+    for mkey, files in months.items():
+        for f in files:
+            file_to_month[f] = mkey
+
+    failed_months, ok_months = set(), set()
+    for path in failed_paths:
+        failed_months.add(file_to_month.get(path, path))
+    for path in file_status.get("succeeded", []):
+        ok_months.add(file_to_month.get(path, path))
+    # A month with a mix of ok and failed files counts as failed.
+    ok_months -= failed_months
+
+    return {
+        "succeeded": sorted(ok_months),
+        "failed": sorted(failed_months),
+        "failed_detail": list(file_status.get("failed", [])),
+        "n_succeeded": len(ok_months),
+        "n_failed": len(failed_months),
+    }
 
 
 # ============================================================================
@@ -916,6 +1038,8 @@ def main():
         logger.info("Scope: all of Reddit")
 
     drop_counts = defaultdict(int)
+    # Per-file read result (which inputs decompressed cleanly vs. failed).
+    file_status = {"succeeded": [], "failed": []}
     rng = random.Random(args.seed) if args.seed is not None else random.Random()
 
     # A round-robin shard can get an empty slice (num_shards > num_files); it
@@ -932,11 +1056,13 @@ def main():
             half_years=set(), drop_counts=drop_counts, files=[],
             shard_name=shard_name,
             prefilter_samples={b: [] for b in PREFILTER_BUCKETS},
+            file_status=file_status,
         )
         return
 
     stream = stream_corpus(
-        paths, args.start_year, args.end_year, allowed, drop_counts
+        paths, args.start_year, args.end_year, allowed, drop_counts,
+        file_status=file_status,
     )
 
     # Count.
@@ -946,13 +1072,21 @@ def main():
     )
 
     logger.info(
-        "Scope drops — subreddit:%s empty:%s year:%s bad_ts:%s parse:%s",
+        "Scope drops — subreddit:%s empty:%s year:%s bad_ts:%s parse:%s "
+        "corrupt_file:%s",
         f"{drop_counts['subreddit']:,}",
         f"{drop_counts['empty']:,}",
         f"{drop_counts['year']:,}",
         f"{drop_counts['bad_timestamp']:,}",
         f"{drop_counts['parse_error']:,}",
+        f"{drop_counts['corrupt_file']:,}",
     )
+    if file_status["failed"]:
+        logger.error(
+            "%d input file(s) FAILED to decompress: %s",
+            len(file_status["failed"]),
+            ", ".join(f["path"] for f in file_status["failed"]),
+        )
 
     # --- Map mode: write the shard and stop (no postfilter, no final save) ---
     if args.mode == "map":
@@ -967,6 +1101,7 @@ def main():
             paths,
             shard_name=shard_name,
             prefilter_samples=prefilter_samples,
+            file_status=file_status,
         )
         logger.info("Map task %d done (%s).", args.shard_index,
                     shard_name or f"shard {args.shard_index}")
@@ -1024,6 +1159,9 @@ def main():
         filter_samples=(
             {**prefilter_samples, "low_frequency": postfilter_samples}
             if args.sample_removed else None
+        ),
+        month_status=build_month_status(
+            file_status, group_by_month(paths)
         ),
     )
 

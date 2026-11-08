@@ -30,6 +30,10 @@ set -euo pipefail
 : "${BATCH_INDEX:?BATCH_INDEX must be set}"
 : "${DUMP_DIR:?}"
 : "${SUBREDDIT_FILE:?}"
+# DUMP_INPUT (optional): a space-separated list of specific dump files to map
+# instead of the whole DUMP_DIR. submit_freq_missing.sh sets this to only the
+# missing months' files; the main pipeline leaves it empty to scan DUMP_DIR.
+DUMP_INPUT="${DUMP_INPUT:-}"
 : "${OUT_DIR:?}"
 : "${SHARD_DIR:?}"
 : "${STEM:?}"
@@ -60,6 +64,15 @@ BATCH_SIZE=$(( END - START + 1 ))
 # the next task in the batch immediately.
 ARRAY_SPEC="${START}-${END}%${BATCH_SIZE}"
 
+# Input selector: an explicit --input file list (missing-months run) or the
+# whole dump dir (full pipeline). The array index selects the Nth month within
+# whichever set is passed, since both go through --split month.
+if [[ -n "$DUMP_INPUT" ]]; then
+    INPUT_ARGS="--input $DUMP_INPUT"
+else
+    INPUT_ARGS="--reddit-monthly-dir '$DUMP_DIR'"
+fi
+
 MAP_JOB=$(sbatch --parsable \
     --job-name="freq_map_b${BATCH_INDEX}" \
     --nodes=1 \
@@ -80,7 +93,7 @@ MAP_JOB=$(sbatch --parsable \
         python -u freq_matrix.py \
             --mode map \
             --split month \
-            --reddit-monthly-dir '$DUMP_DIR' \
+            $INPUT_ARGS \
             --subreddit-file '$SUBREDDIT_FILE' \
             --shard-dir '$SHARD_DIR' \
             --shard-index \"\$SLURM_ARRAY_TASK_ID\" \

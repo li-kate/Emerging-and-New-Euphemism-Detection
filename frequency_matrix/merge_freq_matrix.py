@@ -89,6 +89,9 @@ def merge_shards(shard_files):
     half_years = set()
     pooled_samples = {b: [] for b in PREFILTER_BUCKETS}
     seen_samples = {b: set() for b in PREFILTER_BUCKETS}
+    # Per-month read status aggregated across shards (from write_shard).
+    months_succeeded, months_failed = set(), set()
+    failed_detail = []
 
     for i, path in enumerate(shard_files, 1):
         with open(path, encoding="utf-8") as f:
@@ -122,6 +125,21 @@ def merge_shards(shard_files):
         for hy in shard.get("half_years", []):
             half_years.add(hy)
 
+        # Per-month read status. Shards written by the month split carry a
+        # "shard_name" that is the month key (e.g. RC_2018-07); fall back to the
+        # basename so older shards without month_ok still report something.
+        month_key = shard.get("shard_name") or os.path.basename(path).replace(
+            SHARD_SUFFIX, ""
+        )
+        shard_failed = shard.get("files_failed", [])
+        failed_detail.extend(shard_failed)
+        # Default to OK for shards written before month_ok existed, unless they
+        # recorded a failure.
+        if shard.get("month_ok", not shard_failed):
+            months_succeeded.add(month_key)
+        else:
+            months_failed.add(month_key)
+
         logger.info(
             "Merged shard %d/%d: %s (running: %s terms)",
             i,
@@ -130,8 +148,19 @@ def merge_shards(shard_files):
             f"{len(counts):,}",
         )
 
+    # A month that failed in one shard is failed overall, even if another shard
+    # for a differently-named key succeeded.
+    months_succeeded -= months_failed
+    month_status = {
+        "succeeded": sorted(months_succeeded),
+        "failed": sorted(months_failed),
+        "failed_detail": failed_detail,
+        "n_succeeded": len(months_succeeded),
+        "n_failed": len(months_failed),
+    }
+
     return (counts, totals_raw, prefilter_counts, half_years, drop_counts,
-            pooled_samples)
+            pooled_samples, month_status)
 
 
 def main():
@@ -221,7 +250,19 @@ def main():
     logger.info("Found %d shard(s) in %s", len(shard_files), args.shard_dir)
 
     (counts, totals_raw, prefilter_counts, half_years, drop_counts,
-     pooled_samples) = merge_shards(shard_files)
+     pooled_samples, month_status) = merge_shards(shard_files)
+
+    if month_status["failed"]:
+        logger.warning(
+            "%d month(s) FAILED to decompress and are incomplete in this "
+            "matrix: %s. Re-run map for them, then re-merge.",
+            month_status["n_failed"],
+            ", ".join(month_status["failed"]),
+        )
+    logger.info(
+        "Month read status: %d succeeded, %d failed.",
+        month_status["n_succeeded"], month_status["n_failed"],
+    )
 
     if not counts:
         logger.error("No terms after merging shards. Check the map outputs.")
@@ -291,6 +332,7 @@ def main():
             {**prefilter_samples, "low_frequency": postfilter_samples}
             if args.sample_removed else None
         ),
+        month_status=month_status,
     )
 
     logger.info(
