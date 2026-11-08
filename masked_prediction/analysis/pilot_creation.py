@@ -36,7 +36,7 @@ Example:
         --dea-file ../../data_collection/word_lists/drug_synonyms.txt \\
         --out pilot_words.json \\
         --seed 0 \\
-        --min-freq 50 --min-periods 8 \\
+        --min-freq 50 --min-periods 3 \\
         --n-pilot 30
 """
 

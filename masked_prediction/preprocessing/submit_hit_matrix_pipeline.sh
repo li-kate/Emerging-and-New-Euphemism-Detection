@@ -2,41 +2,57 @@
 set -euo pipefail
 
 # ============================================================================
-# Hit-matrix pipeline: pilot (SLURM job) -> map (SLURM array) -> merge (reduce).
+# Hit-matrix pipeline: map (SLURM array, batched) -> merge.
 #
-#   0. Pilot: pilot_creation.py selects the control words (pilot_words.json)
-#      from the frequency matrix + DEA list. Runs as its OWN SLURM job (not on
-#      the submit node) so numpy/pandas are installed in the job environment —
-#      the submit node may not have them. Every map task reads its output, so
-#      the map array waits for it via afterok.
-#   1. Map array: ONE TASK PER MONTH. Each task scores a single month with BERT
-#      (hit_matrix.py --mode map) and writes one shard. GPU per task. Starts
-#      after the pilot job succeeds (afterok).
-#   2. Merge: after all map tasks succeed (afterok), merge_hit_matrix.py sums
-#      the shards into the summary table + matrices aligned to the frequency
-#      matrix.
+#   1. Map: ONE TASK PER MONTH. Each task scores a single month with BERT
+#      (hit_matrix.py --mode map) and writes one shard. GPU per task.
+#   2. Merge: after the final map batch leaves the queue, merge_hit_matrix.py
+#      sums the shards into the summary table + matrices aligned to the
+#      frequency matrix.
+#
+# The pilot config (pilot_words.json) must already exist — it is built
+# separately and consumed by every map task.
+#
+# Submit-cap aware (like submit_freq_matrix_pipeline.sh). The cluster QOS caps
+# how many jobs a user may have in the queue at once, and a dependent job is
+# still *submitted* (queued) immediately — so the kept months cannot be thrown
+# at the scheduler as one big array if that array exceeds the cap. Instead the
+# months are split into consecutive BATCHES of at most MAX_SUBMIT-1 tasks: this
+# script submits the first batch, and a tiny self-chaining controller
+# (_hit_batch_controller.sh) submits each later batch only once the previous one
+# has left the queue, then the merge after the last batch. At any time at most
+# one batch + one controller/merge job is in the queue, so the submit cap is
+# never exceeded.
 #
 # Nothing in this pipeline runs Python on the submit node; the only submit-node
-# work is globbing dump filenames to size the array (no Python needed).
+# work is globbing dump filenames and filtering months (no Python needed).
 #
-# Mirrors submit_freq_matrix_pipeline.sh (same month grouping and array sizing);
-# the differences are the pilot pre-job and the GPU request on the map array.
+# Mirrors submit_freq_matrix_pipeline.sh + _freq_batch_controller.sh (same
+# month grouping, same batching). The hit-matrix differences: a GPU request on
+# each map task, and restricting the months to those whose half-year is in the
+# frequency matrix.
 #
-# PREREQUISITE: the frequency matrix must already be built (freq_dir below),
-# since it defines the target words + denominator and its scope hash is checked.
+# PREREQUISITES: the frequency matrix must already be built (freq_dir below),
+# since it defines the target words + denominator and its scope hash is checked;
+# and pilot_words.json must already exist (built separately).
 #
 # to run:
-#   chmod +x submit_hit_matrix_pipeline.sh
+#   chmod +x submit_hit_matrix_pipeline.sh _hit_batch_controller.sh
 #   ./submit_hit_matrix_pipeline.sh
 # ============================================================================
 
-cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")}"
+# Resolve the directory holding this script and its companions. When run
+# directly this is the script's own folder; when submitted with sbatch, SLURM
+# copies the script to a throwaway spool dir, so $0 is useless — use
+# $SLURM_SUBMIT_DIR (the directory sbatch was invoked from) instead.
+SCRIPT_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")" && pwd)}"
+cd "$SCRIPT_DIR"
 mkdir -p logs_hit_matrix
 
 # --- Configuration -----------------------------------------------------------
 DUMP_DIR="/storage/cedar/cedar0/cedarp-smussmann3-0/kmehta301/reddit_zst"
 SUBREDDIT_FILE="drug_subreddit_list.txt"      # must match the frequency build
-FREQ_DIR="freq_drug_subreddits"               # existing frequency matrix
+FREQ_DIR="freq_drug_subreddits_unfiltered"               # existing frequency matrix
 FREQ_STEM="freq"
 DEA_FILE="../../data_collection/word_lists/drug_synonyms.txt"
 PILOT_FILE="pilot_words.json"
@@ -46,57 +62,44 @@ STEM="hits"
 
 MODEL_NAME="bert-base-uncased"
 BATCH_SIZE=64
-MIN_CONTEXTS=30
 
-# Pilot selection knobs (see pilot_creation.py / hit_matrix_plan.md 5b).
-PILOT_SEED=0
-PILOT_MIN_FREQ=50
-PILOT_MIN_PERIODS=8
-PILOT_N=30
+# Optional per-half-year context sampling for manual spot-checking
+# (hit_matrix_plan.md 8). Set SAMPLE_WORD to a target word to keep a random
+# sample of up to SAMPLE_SIZE of its full contexts per half-year; the map tasks
+# write the sample into each shard and the merge unions them into
+# ${OUT_DIR}/${STEM}_sample.json. Leave SAMPLE_WORD empty to disable (default).
+#   SAMPLE_WORD=molly ./submit_hit_matrix_pipeline.sh
+SAMPLE_WORD="${SAMPLE_WORD:-}"
+SAMPLE_SIZE="${SAMPLE_SIZE:-1000}"
+SAMPLE_SEED="${SAMPLE_SEED:-0}"
 
-# SLURM array throttle; see submit_freq_matrix_pipeline.sh for the rationale.
-MAX_CONCURRENT="${MAX_CONCURRENT:-50}"
+# QOS submit cap: the MOST jobs this user may have in the queue at once
+# (running + pending). One array task counts as one queued job, so an array
+# bigger than this is rejected at submit time with QOSMaxSubmitJobPerUserLimit.
+# To stay under it, the kept months are split into consecutive batches of at
+# most MAX_SUBMIT-1 tasks (one slot is left for the chained controller/merge
+# job), and _hit_batch_controller.sh submits them one at a time. Within a
+# batch the "%" throttle starts the next GPU task as soon as one finishes.
+#
+# Default 10 stays well under the ICE QOS limit; raise toward the real cap for
+# fewer batches (more GPUs used at once), or lower it to be a good neighbor. It
+# must stay <= the real cap.
+MAX_SUBMIT="${MAX_SUBMIT:-15}"
 
 PY_DEPS="numpy pandas nltk zstandard orjson torch transformers"
 
-# --- Sanity: the frequency matrix must exist ---------------------------------
+# --- Sanity: the frequency matrix and pilot config must exist ----------------
 if [[ ! -f "${FREQ_DIR}/${FREQ_STEM}_words.csv" || ! -f "${FREQ_DIR}/${FREQ_STEM}_meta.json" ]]; then
     echo "ERROR: frequency matrix not found in ${FREQ_DIR}"
     echo "       (need ${FREQ_STEM}_words.csv and ${FREQ_STEM}_meta.json)."
     echo "       Build it first with submit_freq_matrix_pipeline.sh."
     exit 1
 fi
-
-# --- Step 0: pilot selection (its own SLURM job) -----------------------------
-# Runs on a compute node so numpy/pandas get installed in the job env. The map
-# array depends on this via afterok, so pilot_words.json always exists before
-# any month task reads it. CPU-only; no GPU requested.
-PILOT_JOB=$(sbatch --parsable \
-    --job-name=hit_pilot \
-    --nodes=1 \
-    --ntasks=1 \
-    --cpus-per-task=1 \
-    --mem=16G \
-    --time=0:30:00 \
-    --output="logs_hit_matrix/pilot_%j.out" \
-    --mail-type=FAIL \
-    --wrap="
-        set -euo pipefail
-        module load anaconda3
-        source \"\$(conda info --base)/etc/profile.d/conda.sh\"
-        conda activate base
-        pip install numpy pandas
-        python -u pilot_creation.py \
-            --freq-dir '$FREQ_DIR' \
-            --stem '$FREQ_STEM' \
-            --dea-file '$DEA_FILE' \
-            --out '$PILOT_FILE' \
-            --seed $PILOT_SEED \
-            --min-freq $PILOT_MIN_FREQ \
-            --min-periods $PILOT_MIN_PERIODS \
-            --n-pilot $PILOT_N
-    ")
-echo "Submitted pilot job: $PILOT_JOB -> $PILOT_FILE"
+if [[ ! -f "$PILOT_FILE" ]]; then
+    echo "ERROR: pilot config not found: $PILOT_FILE"
+    echo "       Build it first (pilot_creation.py) before running this pipeline."
+    exit 1
+fi
 
 # --- Months to score = dump months that are IN the frequency matrix ----------
 # The frequency matrix was built on a specific scope and year range; its
@@ -164,25 +167,6 @@ if [[ $NUM_MONTHS -eq 0 ]]; then
 fi
 echo "First/last kept month: ${months[0]} ... ${months[$((NUM_MONTHS - 1))]}"
 
-# --- Guard against the QOS submit cap ----------------------------------------
-# %MAX_CONCURRENT only limits how many RUN at once; the whole array still
-# counts against the QOS "max submitted jobs per user" cap. If the array is
-# bigger than MAX_SUBMIT, submission will be rejected (QOSMaxSubmitJobPerUserLimit).
-# Set MAX_SUBMIT to your QOS cap (ICE default 500) minus whatever you already
-# have queued. If the kept array still exceeds it, submit in slices with
-# --months, e.g.:
-#   ./submit_hit_matrix_pipeline.sh   # edit MONTHS_SLICE below to a subset
-MAX_SUBMIT="${MAX_SUBMIT:-500}"
-if [[ $NUM_MONTHS -gt $MAX_SUBMIT ]]; then
-    echo ""
-    echo "ERROR: $NUM_MONTHS tasks exceeds MAX_SUBMIT=$MAX_SUBMIT (QOS submit cap)."
-    echo "       Even restricted to the matrix, the array is too large to submit at once."
-    echo "       Submit in slices by setting MONTHS_SLICE to a subset of these months"
-    echo "       and rerunning, or raise MAX_SUBMIT if your QOS allows it."
-    echo "       Kept months: ${months[*]}"
-    exit 1
-fi
-
 # --- Clean stale shards ------------------------------------------------------
 mkdir -p "$SHARD_DIR"
 rm -f "$SHARD_DIR"/*.part.json "$SHARD_DIR"/*.part.json.tmp 2>/dev/null || true
@@ -190,80 +174,57 @@ rm -f "$SHARD_DIR"/*.part.json "$SHARD_DIR"/*.part.json.tmp 2>/dev/null || true
 # The map array must index into EXACTLY the kept months (not re-glob all dump
 # months), so pass the kept list to hit_matrix.py --months. select_month_key()
 # then restricts to this list and the array index selects the Nth kept month,
-# keeping the array index <-> month mapping correct.
+# keeping the array index <-> month mapping correct. The batch controller
+# turns a batch's array range into the matching slice of this list.
 MONTHS_ARG="${months[*]}"
 
-# --- Map array: one GPU task per month ---------------------------------------
-ARRAY_SPEC="0-$((NUM_MONTHS - 1))"
-if [[ -n "$MAX_CONCURRENT" && "$MAX_CONCURRENT" -gt 0 ]]; then
-    ARRAY_SPEC="${ARRAY_SPEC}%${MAX_CONCURRENT}"
-    echo "Submitting $NUM_MONTHS month tasks, running <= $MAX_CONCURRENT at once."
-else
-    echo "Submitting $NUM_MONTHS month tasks with no concurrency throttle."
+# Optional sampling flags, passed to every map task only when SAMPLE_WORD is set.
+SAMPLE_ARGS=""
+if [[ -n "$SAMPLE_WORD" ]]; then
+    SAMPLE_ARGS="--sample-word '$SAMPLE_WORD' --sample-size $SAMPLE_SIZE --sample-seed $SAMPLE_SEED"
+    echo "Sampling up to $SAMPLE_SIZE contexts per half-year for word '$SAMPLE_WORD' (seed $SAMPLE_SEED)."
+    echo "  -> unioned sample will be written to ${OUT_DIR}/${STEM}_sample.json"
 fi
 
-MAP_JOB=$(sbatch --parsable \
-    --dependency="afterok:${PILOT_JOB}" \
-    --job-name=hit_map \
-    --nodes=1 \
-    --ntasks-per-node=1 \
-    --cpus-per-task=4 \
-    --gres=gpu:1 \
-    --mem=32G \
-    --time=8:00:00 \
-    --array="$ARRAY_SPEC" \
-    --output="logs_hit_matrix/map_%A_%a.out" \
-    --mail-type=FAIL \
-    --wrap="
-        set -euo pipefail
-        module load anaconda3
-        source \"\$(conda info --base)/etc/profile.d/conda.sh\"
-        conda activate base
-        pip install $PY_DEPS
-        python -u hit_matrix.py \
-            --mode map \
-            --reddit-monthly-dir '$DUMP_DIR' \
-            --subreddit-file '$SUBREDDIT_FILE' \
-            --freq-dir '$FREQ_DIR' \
-            --freq-stem '$FREQ_STEM' \
-            --dea-file '$DEA_FILE' \
-            --pilot-file '$PILOT_FILE' \
-            --shard-dir '$SHARD_DIR' \
-            --shard-index \"\$SLURM_ARRAY_TASK_ID\" \
-            --months $MONTHS_ARG \
-            --model-name '$MODEL_NAME' \
-            --batch-size $BATCH_SIZE \
-            --fp16
-    ")
-echo "Submitted map array: $MAP_JOB ($ARRAY_SPEC) — one GPU task per month"
-echo "The map array will start after the pilot job succeeds (afterok)."
+# --- Map: self-chaining batches of <= (MAX_SUBMIT - 1) month tasks -----------
+# A dependency only delays when a job *runs* — a dependent job is still
+# *submitted* immediately and still counts against the submit cap. So we cannot
+# submit all batches up front, even chained. We submit only batch 0 here, plus
+# the controller chains each later batch once its predecessor leaves the queue,
+# and finally the merge. At any moment the queue holds at most one map batch
+# (<= BATCH_MAX) plus one controller/merge job, respecting the submit cap.
+if [[ -z "$MAX_SUBMIT" || "$MAX_SUBMIT" -lt 2 ]]; then
+    # Need room for the batch array AND one controller/merge job under the cap.
+    echo "ERROR: MAX_SUBMIT must be >= 2 (got '$MAX_SUBMIT')."
+    exit 1
+fi
 
-# --- Merge (reduce), after all map tasks succeed -----------------------------
-MERGE_JOB=$(sbatch --parsable \
-    --dependency="afterok:${MAP_JOB}" \
-    --job-name=hit_merge \
-    --nodes=1 \
-    --ntasks=1 \
-    --cpus-per-task=1 \
-    --mem=32G \
-    --time=1:00:00 \
-    --output="logs_hit_matrix/merge_%j.out" \
-    --mail-type=END,FAIL \
-    --wrap="
-        set -euo pipefail
-        module load anaconda3
-        source \"\$(conda info --base)/etc/profile.d/conda.sh\"
-        conda activate base
-        pip install $PY_DEPS
-        python -u merge_hit_matrix.py \
-            --shard-dir '$SHARD_DIR' \
-            --freq-dir '$FREQ_DIR' \
-            --freq-stem '$FREQ_STEM' \
-            --out-dir '$OUT_DIR' \
-            --stem '$STEM' \
-            --min-contexts $MIN_CONTEXTS
-    ")
-echo "Submitted merge job: $MERGE_JOB"
-echo "The merge will start after all map tasks succeed (afterok)."
+# A batch's array may use at most (MAX_SUBMIT - 1) tasks, leaving one submit
+# slot for the pending controller (next batch) or merge job.
+BATCH_MAX=$(( MAX_SUBMIT - 1 ))
+NUM_BATCHES=$(( (NUM_MONTHS + BATCH_MAX - 1) / BATCH_MAX ))
+echo "Splitting $NUM_MONTHS kept month(s) into $NUM_BATCHES batch(es) of <= $BATCH_MAX" \
+     "(leaving one submit slot for the controller)."
+
+CONTROLLER="$SCRIPT_DIR/_hit_batch_controller.sh"
+if [[ ! -x "$CONTROLLER" ]]; then
+    echo "ERROR: controller script not found or not executable: $CONTROLLER"
+    echo "       (expected alongside this pipeline script, in \$SLURM_SUBMIT_DIR"
+    echo "        when run via sbatch). chmod +x it if it exists."
+    exit 1
+fi
+
+# Export everything the controller needs so each chained invocation is
+# self-contained (it runs on a compute node with only these in its env).
+export DUMP_DIR SUBREDDIT_FILE FREQ_DIR FREQ_STEM DEA_FILE PILOT_FILE
+export OUT_DIR SHARD_DIR STEM MODEL_NAME BATCH_SIZE PY_DEPS
+export BATCH_MAX NUM_MONTHS NUM_BATCHES CONTROLLER MONTHS_ARG
+export SAMPLE_ARGS SAMPLE_SEED
+
+# Kick off batch 0. The controller submits the batch array, then chains the
+# next controller invocation (or the merge) after it.
+BATCH_INDEX=0 "$CONTROLLER"
+
 echo ""
-echo "Chain: pilot ($PILOT_JOB) -> map ($MAP_JOB) -> merge ($MERGE_JOB)"
+echo "Pipeline launched: controller walks $NUM_BATCHES batch(es) -> merge."
+echo "At most one batch (<= $BATCH_MAX tasks) + one controller/merge job is queued at a time."

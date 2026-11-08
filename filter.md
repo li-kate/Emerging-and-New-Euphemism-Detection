@@ -4,16 +4,34 @@
 
 The frequency matrix counts how many times each word occurs in each half-year of the filtered Reddit corpus. It serves two roles:
 
-1. **Target word list:** its columns (after filtering) are the final target words for the hit matrix script.
+1. **Target word list:** its columns are the candidate target words for the hit matrix script. The hit script chooses which of them to actually score (see the frequency-gate split below).
 2. **Denominator:** `hit_rate_k = hits_k / frequency`.
 
 This plan covers filtering, saving, loading, and keeping it consistent with the hit matrix outputs.
+
+## 1a. Where frequency filtering happens: three distinct gates
+
+Frequency thresholds show up at three different stages. They are **not** redundant — they answer different questions and run at different points — so keep them separate:
+
+| Gate | Where | When | Question it answers |
+|---|---|---|---|
+| **Prefilter** | `freq_matrix.py` / `filter.py` | matrix build | Is this token even a candidate word? (length ≥ 4, single word, not a stop word) |
+| **Pre-scoring floor** (`hit_matrix.py --min-freq`) | hit matrix map step | before BERT | Is this word frequent enough to be worth an (expensive) forward pass? Cost/noise gate. |
+| **Reliability mask** (`merge_hit_matrix.py --min-contexts`) | hit matrix merge | after BERT | Does this cell have enough contexts for its hit rate to be trustworthy? |
+
+Consequences of this split, decided after the postfilter-cutoff analysis (see `frequency_matrix/analyze_postfilter_cutoff.ipynb`):
+
+- **The frequency matrix is an unfiltered archive.** Build it with the prefilter only (no postfilter floor). It stores every candidate surface form and its true per-half-year counts, so it is an exact denominator and a reusable source of truth. `freq_meta.json` records `postfilter: "none"`, `min_freq: null` for such a build.
+- **The floor moved into the hit matrix as a runtime choice.** `hit_matrix.py --min-freq N` keeps a word only if its count reaches `N` in at least one half-year (the leakage-safe per-half-year rule from `postfilter_per_half_year`), and scores only those. The same unfiltered matrix can be re-scored at a different floor without rebuilding it. Default is **2**.
+- **Why a floor at all, if the matrix is unfiltered and the reliability mask exists?** Because `hit_matrix.py` runs one BERT forward pass per occurrence of every scored word, and the matrix is dominated by hapax noise (median nonzero count = 1 per half-year, ~5.4M columns). Scoring all of it would spend GPU on frequency-1 junk that the reliability mask then discards anyway. The floor avoids paying for that noise *before* paying for it; the reliability mask is a separate, post-scoring trust filter on cells that were already scored.
+- **Real-time emergence framing fixes the floor low.** A word that is emerging has little data in its onset half-year, so a high floor would make it invisible in exactly the half-year you want to catch. Keep `--min-freq` low (2–3); defer reliability to the post-scoring mask and the stricter pilot thresholds, which naturally kick in once a word has accumulated enough contexts.
+- **Variants are not merged, and a variant-aware keep rule was rejected.** The `analyze_postfilter_cutoff.ipynb` section-4b fragmentation check measured whether summing plural/hyphen/apostrophe surface variants would rescue any known term the floor drops: it rescued **0** of the `drug_synonyms` and `candidates` terms at every floor, and only a marginal, mostly-Spanish-plural slice of the noisier `all_dea` list. So variant-aware keep adds coupling (the floor would depend on a variant rule, recorded in meta) for no recall gain on the lists that matter. Columns stay surface-form; any alias merging is a post-hoc, signal-driven step on the hit-matrix output, never an upstream column merge (which would also break `n_scored == frequency` and flatten the emergence signal).
 
 ## 2. Contents
 
 - **Axes:** rows are half-years (e.g. `2012H1`, about 40 of them), columns are words (about 1M before filtering; fewer after).
 - **Cell value:** number of occurrences of that word in that half-year (one occurrence = one context in the hit script).
-- **Filtered:** words removed by the prefilter or postfilter below do not appear in the matrix, so they are never target words.
+- **Filtered:** words removed by the **prefilter** do not appear in the matrix. The **postfilter floor no longer runs at build time** (see section 1a): the matrix is an unfiltered archive, and the floor is applied later by `hit_matrix.py --min-freq` to choose which columns to score. A legacy build-time postfilter is still available for backward compatibility but is not the default path.
 
 ## 2b. Corpus scope: subreddit list or all of Reddit
 
@@ -72,7 +90,16 @@ Rules, applied in order. A term is counted against the **first** filter it fails
 
 `None` terms are counted under `short_terms`.
 
-### Postfilter (applied to the created matrix)
+### Postfilter (now applied downstream, not at build time)
+
+> **Note (see section 1a):** the per-half-year postfilter logic below is no
+> longer run when building the frequency matrix. The same leakage-safe
+> keep rule (`postfilter_per_half_year`) is now applied by
+> `hit_matrix.py --min-freq` to select which columns to score, so the matrix
+> stays an unfiltered archive. The description below documents that shared
+> keep/null rule; `--min-freq` corresponds to `MIN_FREQ` here. A build-time
+> postfilter remains available for backward compatibility but is not the
+> default.
 
 The postfilter has three modes, chosen with `--postfilter-mode` and
 `--no-postfilter`. The default is **per-half-year**.

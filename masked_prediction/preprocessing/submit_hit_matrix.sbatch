@@ -48,11 +48,26 @@ echo "============================================"
 
 DUMP_DIR="/storage/cedar/cedar0/cedarp-smussmann3-0/kmehta301/reddit_zst"
 SUBREDDIT_FILE="drug_subreddit_list.txt"
-FREQ_DIR="freq_drug_subreddits"
+FREQ_DIR="freq_drug_subreddits_unfiltered"
 DEA_FILE="../../data_collection/word_lists/drug_synonyms.txt"
 PILOT_FILE="pilot_words.json"
 OUT_DIR="hits_drug_subreddits"
 SHARD_DIR="${OUT_DIR}/shards"
+
+# Optional per-half-year context sampling for manual spot-checking
+# (hit_matrix_plan.md 8). Set SAMPLE_WORD to keep a random sample of up to
+# SAMPLE_SIZE of that word's full contexts per half-year, written into this
+# month's shard under "word_sample". Leave empty to disable (default).
+#   SAMPLE_WORD=molly sbatch --array=0 submit_hit_matrix.sbatch
+SAMPLE_WORD="${SAMPLE_WORD:-}"
+SAMPLE_SIZE="${SAMPLE_SIZE:-1000}"
+SAMPLE_SEED="${SAMPLE_SEED:-0}"
+
+SAMPLE_ARGS=()
+if [[ -n "$SAMPLE_WORD" ]]; then
+    SAMPLE_ARGS=(--sample-word "$SAMPLE_WORD" --sample-size "$SAMPLE_SIZE" --sample-seed "$SAMPLE_SEED")
+    echo "Sampling up to $SAMPLE_SIZE contexts/half-year for word '$SAMPLE_WORD' (seed $SAMPLE_SEED)."
+fi
 
 python -u hit_matrix.py \
     --mode map \
@@ -65,6 +80,7 @@ python -u hit_matrix.py \
     --shard-index "${SLURM_ARRAY_TASK_ID:-0}" \
     --model-name bert-base-uncased \
     --batch-size 64 \
-    --fp16
+    --fp16 \
+    "${SAMPLE_ARGS[@]}"
 
 echo "Finished: $(date)"

@@ -46,6 +46,7 @@ import json
 import logging
 import math
 import os
+import random
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -85,8 +86,51 @@ DEFAULT_MAX_SIDE_WORDS = 32  # words kept on each side of the target when trunca
 # ============================================================================
 
 
-def load_target_words(freq_dir, stem="freq"):
-    """Target words = the frequency matrix columns (``<stem>_words.csv``)."""
+def load_target_words(freq_dir, stem="freq", min_freq=1):
+    """
+    Target words to score = the frequency matrix columns, gated by a
+    **cumulative, causal (real-time)** per-half-year frequency floor.
+
+    The frequency matrix is the unfiltered archive of every surface form and
+    its per-half-year counts. This is the pipeline's **cost/noise gate**: it
+    decides which columns are worth a (expensive) BERT forward pass, before any
+    scoring. It is applied here, at scoring time, so the floor is a runtime
+    choice rather than baked into the matrix — the same unfiltered matrix can
+    be scored at different floors without a rebuild.
+
+    Eligibility rule (cumulative, "current half-year or before"): a word
+    becomes eligible in the **first** half-year ``H*`` where its count reaches
+    ``min_freq``, and stays eligible for every half-year ``>= H*``. This is the
+    real-time / emerging-term reading: once a term has surfaced it keeps being
+    watched, and a *future* frequency spike never makes it eligible in an
+    *earlier* half-year (no look-ahead / leakage). A word that never reaches
+    the floor in any half-year is dropped entirely (no cells, no GPU).
+
+    The caller enforces this per occurrence by comparing the occurrence's
+    half-year against the word's first-eligible half-year (``process_month``);
+    this function just computes that per-word scalar. ``min_freq <= 1`` makes
+    every column eligible from its first half-year (equivalent to the
+    unfiltered matrix, no floor).
+
+    This is distinct from, and complementary to, the two other frequency
+    gates:
+      * it runs **before**/**during** scoring, to avoid spending GPU on hapax
+        noise and on half-years before a term has emerged;
+      * a downstream reliability threshold on ``frequency`` (the old
+        ``min_contexts``) masks hit *rates* on cells with too few contexts,
+        in analysis — the merge no longer computes rates;
+      * pilot selection (``pilot_creation.py``) is stricter still.
+
+    Returns ``(target_words, eligible_from, half_years, stats)``:
+      * ``target_words``    - set of words with at least one eligible half-year.
+      * ``eligible_from``   - dict ``word -> first-eligible half-year label``
+                              (e.g. ``"2015H2"``); a word is scored in a
+                              half-year ``hy`` iff ``hy >= eligible_from[word]``
+                              (string comparison; ``YYYYH1``/``YYYYH2`` sorts
+                              chronologically).
+      * ``half_years``      - the ordered half-year axis (for reference/logging).
+      * ``stats``           - the floor, rule, and kept/dropped counts.
+    """
     import pandas as pd
 
     words_path = os.path.join(freq_dir, f"{stem}_words.csv")
@@ -96,8 +140,89 @@ def load_target_words(freq_dir, stem="freq"):
             f"merge_freq_matrix.py first."
         )
     words = pd.read_csv(words_path)["word"].astype(str).tolist()
-    logger.info("Loaded %d target words from %s", len(words), words_path)
-    return set(words)
+    n_total = len(words)
+
+    half_years_path = os.path.join(freq_dir, f"{stem}_half_years.csv")
+    if not os.path.exists(half_years_path):
+        raise FileNotFoundError(
+            f"Half-year axis not found: {half_years_path}. Needed to order the "
+            f"half-years for the cumulative eligibility rule."
+        )
+    # Chronological order. YYYYH1/YYYYH2 already sorts lexicographically, but
+    # trust the file's row order (it matches the frequency matrix rows).
+    half_years = pd.read_csv(half_years_path)["half_year"].astype(str).tolist()
+
+    if min_freq is None or min_freq <= 1:
+        # No floor: every word eligible from its first half-year, i.e. the
+        # earliest axis label. (A word with no occurrences anywhere still has
+        # no contexts, so this is harmless.)
+        first_hy = half_years[0] if half_years else ""
+        eligible_from = {w: first_hy for w in words}
+        logger.info(
+            "Loaded %d target words from %s (no frequency floor; min_freq=%s; "
+            "all eligible from %s onward).",
+            n_total, words_path, min_freq, first_hy,
+        )
+        return set(words), eligible_from, half_years, {
+            "min_freq": 1 if (min_freq is None) else int(min_freq),
+            "rule": "cumulative_causal",
+            "n_total": n_total,
+            "n_kept": n_total,
+            "n_dropped": 0,
+        }
+
+    matrix_path = os.path.join(freq_dir, f"{stem}.npy")
+    if not os.path.exists(matrix_path):
+        raise FileNotFoundError(
+            f"Frequency matrix not found: {matrix_path}. Needed to apply "
+            f"--min-freq {min_freq}. Build it with freq_matrix.py / "
+            f"merge_freq_matrix.py, or run with --min-freq 1 to score every "
+            f"column."
+        )
+    # mmap: the matrix can be ~5M columns. We need, per column, the FIRST row
+    # (half-year) that reaches the floor.
+    freq = np.load(matrix_path, mmap_mode="r")
+    if freq.shape[1] != n_total:
+        raise ValueError(
+            f"Frequency matrix columns ({freq.shape[1]}) do not match "
+            f"{stem}_words.csv ({n_total}). Rebuild so they align."
+        )
+    if freq.shape[0] != len(half_years):
+        raise ValueError(
+            f"Frequency matrix rows ({freq.shape[0]}) do not match "
+            f"{stem}_half_years.csv ({len(half_years)}). Rebuild so they align."
+        )
+
+    # Cumulative causal keep: a word is eligible from the first half-year it
+    # reaches the floor. ``reaches`` is a boolean [half_years x words] matrix;
+    # argmax down each column gives the first True row (or 0 if none), and
+    # ``col_any`` tells us whether that column had any True at all.
+    reaches = np.asarray(freq) >= min_freq
+    col_any = reaches.any(axis=0)
+    first_row = reaches.argmax(axis=0)  # 0 when the column is all-False
+
+    hy_arr = np.asarray(half_years, dtype=object)
+    eligible_from = {}
+    for w, keep, r in zip(words, col_any, first_row):
+        if keep:
+            eligible_from[w] = hy_arr[r]
+    target_words = set(eligible_from)
+    n_kept = len(target_words)
+
+    logger.info(
+        "Loaded %d target words from %s; kept %d (%.1f%%) at min_freq=%d "
+        "(cumulative causal rule: eligible from the first half-year a word "
+        "reaches the floor, onward), dropped %d never reaching the floor.",
+        n_total, words_path, n_kept, 100.0 * n_kept / max(n_total, 1),
+        min_freq, n_total - n_kept,
+    )
+    return target_words, eligible_from, half_years, {
+        "min_freq": int(min_freq),
+        "rule": "cumulative_causal",
+        "n_total": n_total,
+        "n_kept": n_kept,
+        "n_dropped": n_total - n_kept,
+    }
 
 
 def load_freq_meta(freq_dir, stem="freq"):
@@ -392,12 +517,66 @@ def update_cell(cell, best_rank, soft_score):
 
 
 # ============================================================================
+# PER-HALF-YEAR CONTEXT SAMPLING (manual spot-check, plan section 8)
+# ============================================================================
+
+
+class ReservoirSampler:
+    """
+    Keep a uniform random sample of up to ``k`` contexts per half-year for a
+    single target word, in one streaming pass (reservoir sampling, Algorithm R).
+
+    The hit-matrix run stores only two scalars per context and never the text,
+    so there is normally nothing to inspect by hand. When ``--sample-word`` is
+    set, this collects the full context string plus its score for the chosen
+    word so a few real examples per half-year can be eyeballed (the plan's
+    "spot-check a few contexts by hand" / "print the text, the top predictions,
+    and best_rank" check). It is diagnostic only and does not affect the
+    aggregated cells or pilot rows.
+
+    Uniformity is per half-year: every occurrence of the word in a half-year has
+    the same chance of ending up in that half-year's reservoir, regardless of
+    how many occurrences that half-year ends up having.
+    """
+
+    def __init__(self, k, seed=0):
+        self.k = k
+        # Each half-year gets its own reservoir and its own seen-counter.
+        self._pools = defaultdict(list)
+        self._seen = defaultdict(int)
+        self._rng = random.Random(seed)
+
+    def offer(self, half_year, record):
+        """Offer one scored context to the ``half_year`` reservoir."""
+        if self.k <= 0:
+            return
+        self._seen[half_year] += 1
+        n = self._seen[half_year]
+        pool = self._pools[half_year]
+        if len(pool) < self.k:
+            pool.append(record)
+        else:
+            # Replace an existing entry with probability k/n.
+            j = self._rng.randint(0, n - 1)
+            if j < self.k:
+                pool[j] = record
+
+    def as_dict(self):
+        """Return ``{half_year: [records...]}`` plus the per-half-year totals."""
+        return {
+            "k": self.k,
+            "samples": {hy: list(pool) for hy, pool in self._pools.items()},
+            "n_seen": dict(self._seen),
+        }
+
+
+# ============================================================================
 # SHARD IO
 # ============================================================================
 
 
 def write_shard(shard_dir, shard_name, cells, pilot_rows, dropped, drop_counts,
-                dea_meta, files, scope):
+                dea_meta, files, scope, target_stats=None, word_sample=None):
     """Write one month's partial hit counts + pilot rows as a JSON shard."""
     os.makedirs(shard_dir, exist_ok=True)
     final_path = os.path.join(shard_dir, f"{shard_name}{SHARD_SUFFIX}")
@@ -408,6 +587,8 @@ def write_shard(shard_dir, shard_name, cells, pilot_rows, dropped, drop_counts,
         "ks": KS,
         "scope": scope,
         "dea": dea_meta,
+        # Pre-scoring frequency floor + kept/dropped counts (min_freq gate).
+        "target_selection": target_stats or {},
         # cells keyed "half_year\tword" so JSON stays flat and mergeable.
         "cells": {f"{hy}\t{w}": cell for (hy, w), cell in cells.items()},
         "pilot_rows": pilot_rows,  # list of [word, half_year, context_id, best_rank, soft_score]
@@ -415,6 +596,10 @@ def write_shard(shard_dir, shard_name, cells, pilot_rows, dropped, drop_counts,
         "drop_counts": dict(drop_counts),
         "files": list(files),
     }
+    # Optional per-half-year random sample of contexts for one word
+    # (--sample-word), for manual spot-checking only.
+    if word_sample is not None:
+        payload["word_sample"] = word_sample
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(payload, f)
     os.replace(tmp_path, final_path)
@@ -460,9 +645,24 @@ def verify_scope(freq_meta, allowed, subreddit_file):
 # ============================================================================
 
 
-def process_month(stream, target_words, pilot_words, dea_ids, exclude_ids,
-                  model, tokenizer, device, args):
-    """Single pass over a month's records: build contexts, score, aggregate."""
+def process_month(stream, target_words, eligible_from, pilot_words, dea_ids,
+                  exclude_ids, model, tokenizer, device, args, sampler=None,
+                  sample_word=None):
+    """Single pass over a month's records: build contexts, score, aggregate.
+
+    ``eligible_from`` maps each target word to its first-eligible half-year
+    label (``load_target_words``, cumulative causal rule). An occurrence is
+    scored only if its half-year is at or after that word's first-eligible
+    half-year; occurrences before it are skipped (counted under the
+    ``before_eligible`` drop reason) so the run never "looks at" a word in a
+    half-year before it has emerged. Since one month maps to one half-year, in
+    practice this either keeps or skips every occurrence of a given word for
+    this task, but it is applied per occurrence to stay correct regardless.
+
+    If ``sampler`` and ``sample_word`` are given, every scored context for
+    ``sample_word`` is also offered to a per-half-year reservoir so a random
+    sample of its full contexts can be written out for manual inspection.
+    """
     import torch
 
     mask_token = tokenizer.mask_token
@@ -487,16 +687,32 @@ def process_month(stream, target_words, pilot_words, dea_ids, exclude_ids,
             buf_ctx, model, tokenizer, device, dea_ids_t, exclude_ids_t,
             buf_target_ids, mask_id, max_length=args.max_length,
         )
-        for w, hy, cid, r, s in zip(buf_word, buf_hy, buf_cid, best_rank, soft_score):
+        for ctx, w, hy, cid, r, s in zip(
+            buf_ctx, buf_word, buf_hy, buf_cid, best_rank, soft_score
+        ):
             update_cell(cells[(hy, w)], r, s)
             if w in pilot_words:
                 pilot_rows.append([w, hy, cid, int(r), float(s)])
+            if sampler is not None and w == sample_word:
+                sampler.offer(hy, {
+                    "context_id": int(cid),
+                    "best_rank": int(r),
+                    "soft_score": float(s),
+                    "context": ctx,
+                })
         buf_ctx, buf_word, buf_hy, buf_cid, buf_target_ids = [], [], [], [], []
 
     for half_year, text in stream:
         # One context per occurrence of each target word in the text.
         for tok, start, end in iter_token_spans(text):
             if tok not in target_words:
+                continue
+            # Cumulative causal eligibility: skip occurrences in half-years
+            # before the word first reached the frequency floor. YYYYH1/YYYYH2
+            # labels sort chronologically, so a string compare is the
+            # "at or before" test.
+            if half_year < eligible_from[tok]:
+                dropped["before_eligible"] += 1
                 continue
             context, reason = build_context(
                 text, start, end, mask_token,
@@ -567,6 +783,18 @@ def main():
     fm.add_argument("--freq-dir", required=True,
                     help="Directory with freq_words.csv and freq_meta.json.")
     fm.add_argument("--freq-stem", default="freq")
+    fm.add_argument(
+        "--min-freq", type=int, default=2,
+        help="Pre/at-scoring cost/noise floor, applied with a CUMULATIVE "
+        "CAUSAL (real-time) rule: a word is scored in a half-year only once it "
+        "has reached this count in that half-year or an earlier one, and from "
+        "then on. A future spike never makes it eligible in an earlier "
+        "half-year (no look-ahead). The frequency matrix is kept unfiltered; "
+        "this chooses the scored subset at runtime. 1 = score every column "
+        "from its first half-year (no floor). This is NOT the reliability gate "
+        "— apply a frequency/min-contexts cutoff downstream when computing "
+        "hit rates.",
+    )
 
     # DEA + pilot.
     parser.add_argument("--dea-file", required=True)
@@ -587,6 +815,26 @@ def main():
                      default=DEFAULT_MIN_CONTEXT_WORDS)
     ctx.add_argument("--max-side-words", type=int,
                      default=DEFAULT_MAX_SIDE_WORDS)
+
+    # Per-half-year context sampling (manual spot-check, plan section 8).
+    smp = parser.add_argument_group("sampling")
+    smp.add_argument(
+        "--sample-word", default=None,
+        help="If set, keep a random sample of this word's full contexts per "
+        "half-year (reservoir sampling) and write them into the shard under "
+        "'word_sample', for manual inspection. The word is lowercased to match "
+        "the occurrence rule. Diagnostic only: does not change the aggregated "
+        "cells or pilot rows.",
+    )
+    smp.add_argument(
+        "--sample-size", type=int, default=1000,
+        help="Max contexts to keep per half-year for --sample-word. If a "
+        "half-year has fewer occurrences, all of them are kept.",
+    )
+    smp.add_argument(
+        "--sample-seed", type=int, default=0,
+        help="Seed for the --sample-word reservoir sampler (reproducible).",
+    )
 
     args = parser.parse_args()
 
@@ -618,7 +866,9 @@ def main():
     freq_meta = load_freq_meta(args.freq_dir, args.freq_stem)
     verify_scope(freq_meta, allowed, args.subreddit_file)
 
-    target_words = load_target_words(args.freq_dir, args.freq_stem)
+    target_words, eligible_from, _half_years, target_stats = load_target_words(
+        args.freq_dir, args.freq_stem, min_freq=args.min_freq,
+    )
     pilot_words = load_pilot_words(args.pilot_file)
     unknown_pilot = pilot_words - target_words
     if unknown_pilot:
@@ -645,14 +895,32 @@ def main():
     dea_ids, _dea_kept, dea_dropped = resolve_dea_token_ids(dea_terms, tokenizer)
     exclude_ids = build_exclusion_ids(tokenizer)
 
+    # Optional per-half-year random sample of one word's contexts.
+    sampler = None
+    sample_word = None
+    if args.sample_word:
+        sample_word = args.sample_word.lower()
+        if sample_word not in target_words:
+            logger.warning(
+                "--sample-word %r is not in the target set; no contexts will "
+                "be sampled. (It may be below --min-freq %s, or absent from "
+                "the frequency matrix.)",
+                sample_word, args.min_freq,
+            )
+        sampler = ReservoirSampler(args.sample_size, seed=args.sample_seed)
+        logger.info(
+            "Sampling up to %d contexts per half-year for word %r (seed=%d).",
+            args.sample_size, sample_word, args.sample_seed,
+        )
+
     # Stream the month and score.
     drop_counts = defaultdict(int)
     stream = stream_corpus(
         files, args.start_year, args.end_year, allowed, drop_counts,
     )
     cells, pilot_rows, dropped, n_contexts = process_month(
-        stream, target_words, pilot_words, dea_ids, exclude_ids,
-        model, tokenizer, device, args,
+        stream, target_words, eligible_from, pilot_words, dea_ids, exclude_ids,
+        model, tokenizer, device, args, sampler=sampler, sample_word=sample_word,
     )
 
     logger.info(
@@ -671,9 +939,19 @@ def main():
         "n_dropped": len(dea_dropped),
         "model_name": args.model_name,
     }
+    word_sample = None
+    if sampler is not None:
+        word_sample = {"word": sample_word, **sampler.as_dict()}
+        n_kept = sum(len(v) for v in word_sample["samples"].values())
+        logger.info(
+            "Sampled %d contexts for word %r across %d half-year(s).",
+            n_kept, sample_word, len(word_sample["samples"]),
+        )
+
     write_shard(
         args.shard_dir, month_key, cells, pilot_rows, dict(dropped),
-        drop_counts, dea_meta, files, scope,
+        drop_counts, dea_meta, files, scope, target_stats,
+        word_sample=word_sample,
     )
 
 
