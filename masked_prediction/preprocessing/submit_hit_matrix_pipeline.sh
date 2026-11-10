@@ -133,6 +133,14 @@ months=()
 for mkey in "${all_months[@]}"; do
     yr="${mkey:3:4}"      # YYYY
     mon="${mkey:8:2}"     # MM
+    # Gate on START_YEAR as well as the frequency matrix's half-years. The freq
+    # matrix can cover earlier half-years (e.g. 2015) than we want to score;
+    # hit_matrix.py drops every pre-START_YEAR record anyway (stream_corpus
+    # "year" filter), so scoring those months just wastes GPU tasks on empty
+    # shards. Skip them at selection time.
+    if (( 10#$yr < START_YEAR )); then
+        continue
+    fi
     # strip a leading zero so "06" -> 6 for the arithmetic compare
     half=$(( 10#$mon <= 6 ? 1 : 2 ))
     hy="${yr}H${half}"
@@ -144,7 +152,8 @@ done
 NUM_MONTHS=${#months[@]}
 SKIPPED=$(( ${#all_months[@]} - NUM_MONTHS ))
 echo "Found ${#dumps[@]} dump files across ${#all_months[@]} dump month(s)."
-echo "Keeping $NUM_MONTHS month(s) in the frequency matrix; skipping $SKIPPED outside it."
+echo "Keeping $NUM_MONTHS month(s) in the frequency matrix and >= $START_YEAR;" \
+     "skipping $SKIPPED (outside the matrix's half-years or before $START_YEAR)."
 if [[ $NUM_MONTHS -eq 0 ]]; then
     echo "ERROR: no dump months fall within the frequency matrix's half-years."
     echo "       Check that DUMP_DIR and the frequency build cover the same period."

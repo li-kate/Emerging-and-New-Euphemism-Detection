@@ -52,6 +52,15 @@ set -euo pipefail
 : "${CONTROLLER:?}"
 : "${MONTHS_ARG:?}"
 
+# Optional: pin the cumulative-causal frequency floor. When unset, hit_matrix.py
+# uses its own default (so the full-build pipeline is unchanged). The missing-
+# months script sets this to match the floor baked into the existing shards,
+# since merge_hit_matrix.py requires every shard to share one min_freq.
+MIN_FREQ_ARG=""
+if [[ -n "${MIN_FREQ:-}" ]]; then
+    MIN_FREQ_ARG="--min-freq $MIN_FREQ"
+fi
+
 # This controller runs either on the submit host (batch 0, from the pipeline
 # script) or on a compute node (later batches, as a chained job). Run sbatch
 # from the directory holding the Python scripts either way.
@@ -100,6 +109,7 @@ MAP_JOB=$(sbatch --parsable \
             --model-name '$MODEL_NAME' \
             --start-year $START_YEAR \
             --batch-size $BATCH_SIZE \
+            $MIN_FREQ_ARG \
             --fp16
     ")
 
