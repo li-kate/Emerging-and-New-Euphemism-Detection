@@ -1,0 +1,208 @@
+{
+  "script": "cpd_hit_logrank.py",
+  "created_utc": "2026-11-06T20:10:04.806035+00:00",
+  "shard_dir": "/Users/kareenamehta/Documents/vscode/ml-research/Emerging-and-New-Euphemism-Detection/hit_matrix_shards",
+  "signal": "mean_log_rank = sum(log(best_rank)) / n_scored",
+  "log_base": "natural",
+  "direction": "decrease (DEA term ranks higher)",
+  "shift_units": "drop in mean log rank; exp(-shift) is the factor applied to the geometric-mean rank",
+  "scope": {
+    "mode": "subreddits",
+    "file": "drug_subreddit_list.txt",
+    "hash": "8399ce893f05b201702c0c0d3039bec76231d132434cf58054bdc905987a98df"
+  },
+  "dea": {
+    "file": "/storage/ice1/0/1/kli605/Emerging-and-New-Euphemism-Detection/data_collection/word_lists/drug_synonyms.txt",
+    "n_single_token": 9,
+    "n_dropped": 52,
+    "model_name": "bert-base-uncased"
+  },
+  "ks_in_shards": [
+    5,
+    10,
+    15,
+    20,
+    50
+  ],
+  "half_years_used": [
+    "2015H1",
+    "2015H2",
+    "2016H1",
+    "2016H2",
+    "2017H1",
+    "2017H2",
+    "2018H1",
+    "2018H2",
+    "2019H1",
+    "2019H2",
+    "2020H1",
+    "2020H2"
+  ],
+  "half_years_excluded": [],
+  "half_years_missing_from_output": [],
+  "month_coverage": {
+    "2015H1": {
+      "months_present": [
+        "2015-01",
+        "2015-04",
+        "2015-05",
+        "2015-06"
+      ],
+      "months_missing": [
+        "2015-02",
+        "2015-03"
+      ]
+    },
+    "2015H2": {
+      "months_present": [
+        "2015-07",
+        "2015-08",
+        "2015-10",
+        "2015-11",
+        "2015-12"
+      ],
+      "months_missing": [
+        "2015-09"
+      ]
+    },
+    "2016H1": {
+      "months_present": [
+        "2016-01",
+        "2016-03",
+        "2016-04",
+        "2016-05",
+        "2016-06"
+      ],
+      "months_missing": [
+        "2016-02"
+      ]
+    },
+    "2016H2": {
+      "months_present": [
+        "2016-07",
+        "2016-08",
+        "2016-09",
+        "2016-10",
+        "2016-11",
+        "2016-12"
+      ],
+      "months_missing": []
+    },
+    "2017H1": {
+      "months_present": [
+        "2017-01",
+        "2017-02",
+        "2017-03",
+        "2017-04",
+        "2017-05",
+        "2017-06"
+      ],
+      "months_missing": []
+    },
+    "2017H2": {
+      "months_present": [
+        "2017-07",
+        "2017-08",
+        "2017-09",
+        "2017-10",
+        "2017-11",
+        "2017-12"
+      ],
+      "months_missing": []
+    },
+    "2018H1": {
+      "months_present": [
+        "2018-01",
+        "2018-02",
+        "2018-03",
+        "2018-04",
+        "2018-05",
+        "2018-06"
+      ],
+      "months_missing": []
+    },
+    "2018H2": {
+      "months_present": [
+        "2018-07",
+        "2018-08",
+        "2018-09",
+        "2018-11",
+        "2018-12"
+      ],
+      "months_missing": [
+        "2018-10"
+      ]
+    },
+    "2019H1": {
+      "months_present": [
+        "2019-01",
+        "2019-02",
+        "2019-03",
+        "2019-04",
+        "2019-05",
+        "2019-06"
+      ],
+      "months_missing": []
+    },
+    "2019H2": {
+      "months_present": [
+        "2019-07",
+        "2019-08",
+        "2019-09",
+        "2019-10",
+        "2019-11",
+        "2019-12"
+      ],
+      "months_missing": []
+    },
+    "2020H1": {
+      "months_present": [
+        "2020-01",
+        "2020-03",
+        "2020-05"
+      ],
+      "months_missing": [
+        "2020-02",
+        "2020-04",
+        "2020-06"
+      ]
+    },
+    "2020H2": {
+      "months_present": [
+        "2020-07",
+        "2020-09",
+        "2020-10"
+      ],
+      "months_missing": [
+        "2020-08",
+        "2020-11",
+        "2020-12"
+      ]
+    }
+  },
+  "eligibility": {
+    "min_scored_per_cell": 30,
+    "min_valid_periods": 6
+  },
+  "pelt": {
+    "model": "l2",
+    "min_size": 3,
+    "penalty": "3.0 * log(n)",
+    "standardization": "robust noise (MAD of first differences)",
+    "noise_floor": 0.02568264162701253
+  },
+  "significance": {
+    "test": "one-sided permutation test of max standardized improvement in rank",
+    "n_perm": 999,
+    "multiple_testing": "Benjamini-Hochberg",
+    "alpha": 0.05,
+    "min_shift": 0.0,
+    "seed": 0
+  },
+  "counts": {
+    "shards": 61,
+    "eligible_words": 32143,
+    "analyzed_words": 32143,
+    "emerging_words": 0
+  }
+}
