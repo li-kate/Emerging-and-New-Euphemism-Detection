@@ -48,6 +48,9 @@ import numpy as np
 
 from corpus_stream import iter_token_spans
 from subreddit_scope import subreddit_hash
+# Shared sentence splitter; aliased to the private name used below so the
+# existing callers in this module are unchanged.
+from text_segmentation import split_sentences as _split_sentences
 
 logger = logging.getLogger(__name__)
 
@@ -297,36 +300,6 @@ def build_exclusion_ids(tokenizer):
 # ============================================================================
 # CONTEXT CONSTRUCTION (plan section 3b)
 # ============================================================================
-
-
-def _split_sentences(text):
-    """
-    Lightweight sentence split with char offsets: returns ``[(start, end), ...]``.
-
-    No new dependency: split on ``.!?`` runs followed by whitespace. Reddit text
-    is messy, so this is deliberately simple; the min-extend / max-truncate
-    rules below handle the fallout (run-ons, missing punctuation).
-    """
-    spans = []
-    start = 0
-    n = len(text)
-    i = 0
-    while i < n:
-        if text[i] in ".!?":
-            j = i + 1
-            while j < n and text[j] in ".!?":
-                j += 1
-            if j >= n or text[j].isspace():
-                spans.append((start, j))
-                while j < n and text[j].isspace():
-                    j += 1
-                start = j
-                i = j
-                continue
-        i += 1
-    if start < n:
-        spans.append((start, n))
-    return spans
 
 
 def build_context(text, occ_start, occ_end, mask_token,

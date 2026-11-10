@@ -162,11 +162,45 @@ def build_ranked_rows(scores, top_n=None):
 # ============================================================================
 
 
+# Defaults for params that were added to the shard format later. An older shard
+# that predates a field is treated as if it carried the field's default, so a
+# field that did not exist yet does not count as a real disagreement (e.g.
+# split_sentences: absent == False, because the old code only ever ran the
+# whole-record path). These MUST match zhu_detection_month.py's argparse
+# defaults.
+PARAM_DEFAULTS = {
+    "mlm_k": 50,
+    "thres": 5,
+    "ms_limit_per_half_year": None,
+    "max_chars": 150,
+    "max_length": 512,
+    "split_sentences": False,
+}
+
+
+def normalize_params(params):
+    """
+    Fill in defaults for any param missing from an older shard, so shards
+    written by different code versions compare equal when they are effectively
+    the same run. Unknown extra keys are kept (they still count as a
+    difference, which is correct — a param we do not know about could change
+    the scores).
+    """
+    merged = dict(PARAM_DEFAULTS)
+    merged.update(params or {})
+    return merged
+
+
 def check_agreement(scopes, param_metas):
     """
     Confirm every month was scored under one scope and one set of Zhu params,
     so the summed half-years are comparable. Aborts on disagreement, mirroring
     the hit-matrix merge's scope/min_freq checks.
+
+    Params are normalized first (``normalize_params``): a field a shard lacks
+    because it predates that field is read as its default, so, for example, an
+    old shard with no ``split_sentences`` key agrees with a new shard that has
+    ``split_sentences: false``.
     """
     uniq_scopes = {json.dumps(s, sort_keys=True) for s in scopes}
     if len(uniq_scopes) > 1:
@@ -174,12 +208,16 @@ def check_agreement(scopes, param_metas):
             f"Shards disagree on scope ({len(uniq_scopes)} distinct). All "
             f"months must be scored with the same subreddit scope."
         )
-    uniq_params = {json.dumps(p, sort_keys=True) for p in param_metas}
-    if len(uniq_params) > 1:
+    distinct = {
+        json.dumps(normalize_params(p), sort_keys=True) for p in param_metas
+    }
+    if len(distinct) > 1:
+        detail = "\n".join(f"  - {d}" for d in sorted(distinct))
         raise SystemExit(
-            f"Shards disagree on Zhu scoring params ({len(uniq_params)} "
-            f"distinct: mlm_k / thres / ms_limit_per_half_year). Re-run all "
-            f"months with the same values so the rankings are comparable."
+            f"Shards disagree on Zhu scoring params ({len(distinct)} distinct "
+            f"sets, after filling defaults for older shards). Re-run the odd "
+            f"months with the same values so the rankings are comparable. "
+            f"Distinct sets:\n{detail}"
         )
 
 
@@ -248,7 +286,7 @@ def main():
         "scope": scopes[0] if scopes else None,
         "keywords": keyword_metas[0] if keyword_metas else None,
         "model": model_metas[0] if model_metas else None,
-        "params": param_metas[0] if param_metas else None,
+        "params": normalize_params(param_metas[0]) if param_metas else None,
         "half_year_counts": {
             hy: hy_counts[hy] for hy in sorted(hy_counts)
         },

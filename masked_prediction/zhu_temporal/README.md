@@ -140,6 +140,14 @@ Pass exactly one of:
   (`len(line) <= 150`). Set `0` to disable.
 - `--max-length` (512): safety truncation around `[MASK]` for any text that
   still over-runs BERT's position limit (rare once `--max-chars` is on).
+- `--split-sentences` (off): split each record into sentences (shared
+  `shared_utils/text_segmentation.split_sentences`) and score each sentence as
+  its own unit, instead of the whole record. Off by default to stay faithful
+  to Zhu (whose unit is the full line). Turn it on so long records contribute
+  their short sentences rather than being dropped by `--max-chars` — useful
+  when `too_long` drops are eating a lot of in-scope data. The `--max-chars`
+  cap then applies per sentence. Note: a run with this on cannot be merged with
+  a run without it (the merge's param-agreement check will reject the mix).
 - `--top-n` (merge, 500): keep only the top-N candidates per half-year in the
   outputs.
 

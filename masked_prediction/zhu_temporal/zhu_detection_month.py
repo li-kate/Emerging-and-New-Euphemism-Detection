@@ -326,32 +326,50 @@ def score_sentence(top_words, input_keyword_set, stopword_set, thres):
 # ============================================================================
 
 
-def iter_masked_sentences(stream, input_keyword_set, max_chars, dropped):
+def iter_masked_sentences(stream, input_keyword_set, max_chars, dropped,
+                          split_sentences=False):
     """
     Yield ``(half_year, masked_sentence)`` for each occurrence of an input
     keyword, masking that occurrence — the temporal analogue of the masked
     sentence construction in ``euphemism_detection``.
 
     Zhu tokenizes with ``nltk.word_tokenize`` and masks the FIRST index of each
-    keyword in the sentence. This reproduces that: one masked sentence per
-    (sentence, keyword) pair, using the first occurrence of the keyword, so the
-    masked sentences match a single-corpus Zhu run.
+    keyword in the text unit. This reproduces that: one masked sentence per
+    (unit, keyword) pair, using the first occurrence of the keyword.
+
+    Text unit (``split_sentences``):
+      * ``False`` (default, faithful to Zhu): the unit is the WHOLE record
+        (one comment/submission). Zhu's ``euphemism_detection`` iterates
+        ``all_text`` and never splits on sentence boundaries — its variable is
+        named ``sentence`` but holds a full line. Kept short only by the char
+        cap below.
+      * ``True``: the record is first split into sentences (shared
+        ``text_segmentation.split_sentences``), and each sentence is its own
+        unit. A keyword is masked in the sentence that contains it, so long
+        records contribute their short sentences instead of being dropped
+        whole by the char cap. This is NOT what Zhu's paper does; it is the
+        sentence-level reading the hit-matrix pipeline uses.
 
     Length filter (faithful to Zhu): ``read_file.read_raw_text`` only keeps
     source lines with ``len(line) <= 150`` CHARACTERS before any masking, which
     is why Zhu never over-runs BERT's 512 positions. The same character cap is
-    applied here: texts longer than ``max_chars`` are skipped entirely (counted
-    under ``too_long`` in ``dropped``), rather than cropped. ``max_chars=None``
-    disables the filter (score every length; the mask-window truncation in
-    ``single_mlm`` is then the only guard against the position limit).
+    applied here PER UNIT: a unit longer than ``max_chars`` is skipped entirely
+    (counted under ``too_long`` in ``dropped``), rather than cropped. With
+    ``split_sentences=True`` the cap is per sentence, so a long record is not
+    discarded wholesale — only its over-long sentences are. ``max_chars=None``
+    disables the filter (the mask-window truncation in ``single_mlm`` is then
+    the only guard against the position limit).
     """
     import nltk
 
-    for half_year, text in stream:
-        if max_chars is not None and len(text) > max_chars:
+    from text_segmentation import iter_sentences
+
+    def mask_units(half_year, unit_text):
+        """Yield masked sentences for every keyword in one text unit."""
+        if max_chars is not None and len(unit_text) > max_chars:
             dropped["too_long"] += 1
-            continue
-        temp = nltk.word_tokenize(text)
+            return
+        temp = nltk.word_tokenize(unit_text)
         token_set = set(temp)
         for kw in input_keyword_set:
             if kw not in token_set:
@@ -363,6 +381,13 @@ def iter_masked_sentences(stream, input_keyword_set, max_chars, dropped):
                 + " ".join(temp[temp_index + 1:])
             )
             yield half_year, masked
+
+    for half_year, text in stream:
+        if split_sentences:
+            for sent_text, _s, _e in iter_sentences(text):
+                yield from mask_units(half_year, sent_text)
+        else:
+            yield from mask_units(half_year, text)
 
 
 # ============================================================================
@@ -438,6 +463,7 @@ def process_month(stream, input_keywords, single_mlm, args):
 
     masked_iter = iter_masked_sentences(
         stream, input_keyword_set, args.max_chars, dropped,
+        split_sentences=args.split_sentences,
     )
     for half_year, masked in masked_iter:
         if cap is not None and hy_counts[half_year] >= cap:
@@ -545,11 +571,19 @@ def main():
                    help="Optional cap on masked sentences scored per half-year "
                    "(analogue of Zhu's ms_limit, per bucket). Default: no cap.")
     z.add_argument("--max-chars", type=int, default=150,
-                   help="Skip any source text longer than this many CHARACTERS "
+                   help="Skip any text UNIT longer than this many CHARACTERS "
                    "before masking, exactly as Zhu's read_file.read_raw_text "
                    "does (len(line) <= 150). This is why Zhu never over-runs "
-                   "BERT's position limit. Set to 0 to disable the filter "
-                   "(then --max-length truncation is the only guard).")
+                   "BERT's position limit. With --split-sentences the cap is "
+                   "per sentence. Set to 0 to disable the filter (then "
+                   "--max-length truncation is the only guard).")
+    z.add_argument("--split-sentences", action="store_true",
+                   help="Split each record into sentences (shared "
+                   "text_segmentation.split_sentences) and score each sentence "
+                   "as its own unit, instead of the whole record. NOT faithful "
+                   "to Zhu (whose unit is the full line), but it lets long "
+                   "records contribute their short sentences rather than being "
+                   "dropped by --max-chars. Default off (Zhu behaviour).")
 
     args = parser.parse_args()
 
@@ -648,6 +682,7 @@ def main():
             "ms_limit_per_half_year": args.ms_limit_per_half_year,
             "max_chars": args.max_chars,
             "max_length": args.max_length,
+            "split_sentences": args.split_sentences,
         },
         "record_drop_counts": dict(drop_counts),
         "sentence_drop_counts": sentence_drops,
