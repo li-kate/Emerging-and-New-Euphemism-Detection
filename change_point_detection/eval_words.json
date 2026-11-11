@@ -1,0 +1,43 @@
+{
+  "description": "Evaluation words for change point detection, taken from the word groups in the earlier cosine-similarity drift analysis (analyze_emerging_csd.py). Multi-word terms are omitted because the frequency matrix only has single-token columns.",
+  "groups": {
+    "euphemism_candidate": [
+      "zing",
+      "zaza",
+      "flakka",
+      "yart",
+      "fein",
+      "fenty",
+      "pressed",
+      "penjamin",
+      "ouid",
+      "oui'd",
+      "tranq",
+      "fetty",
+      "tusi",
+      "stamps",
+      "tucibi"
+    ],
+    "established_euphemism": ["molly", "coke", "crystal", "ping"],
+    "comparison": ["needle", "pharmacy", "prescription", "overdose"],
+    "anchor": [
+      "cathinones",
+      "cocaine",
+      "heroin",
+      "marijuana",
+      "fentanyl",
+      "methamphetamine",
+      "meth",
+      "amphetamine",
+      "oxycodone",
+      "xanax",
+      "adderall",
+      "mdma",
+      "ecstasy",
+      "lsd",
+      "pcp",
+      "codeine",
+      "ketamine"
+    ]
+  }
+}

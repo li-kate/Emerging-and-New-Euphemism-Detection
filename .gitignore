@@ -206,3 +206,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Generated change-point outputs (large CSVs; rerun the scripts to recreate)
+change_point_detection/results_*/
