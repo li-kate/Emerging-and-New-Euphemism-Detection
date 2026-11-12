@@ -181,7 +181,8 @@ class StreamingCosinePELT:
                  "shift", "q_value", "p_value"]
         return results[front + [c for c in results.columns if c not in front]]
 
-    def write_snapshot(self, out_dir, n_plots=30):
+    def write_snapshot(self, out_dir, n_plots=30, ylabel="cosine mean embedding",
+                       signal="cosine similarity to the half-year drug centroid"):
         """Write the current ranking, change points, and plots of the top words."""
         os.makedirs(out_dir, exist_ok=True)
         results = self.snapshot()
@@ -208,13 +209,13 @@ class StreamingCosinePELT:
             to_plot = list(results["word"].head(n_plots))
             plot_words(
                 to_plot, signal_of, cps_of, periods_of,
-                "cosine mean embedding", os.path.join(out_dir, "plots"),
+                ylabel, os.path.join(out_dir, "plots"),
             )
 
         meta = {
             "script": "cpd_cosine_stream.py",
             "created_utc": datetime.now(timezone.utc).isoformat(),
-            "signal": "cosine similarity to the half-year drug centroid",
+            "signal": signal,
             "direction": "decrease" if self.args.decreasing else "increase",
             "live_alert": "p_value < alpha and shift > min_shift, for this word alone",
             "snapshot_emerging": "q_value < alpha and shift > min_shift, across words seen so far",
