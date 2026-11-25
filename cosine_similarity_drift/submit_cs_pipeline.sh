@@ -1,4 +1,3 @@
-
 #!/bin/bash
 set -euo pipefail
 
@@ -16,36 +15,6 @@ BATCH_SIZE=45
 
 ACCOUNT="gts-smussmann3"
 QOS="embers"
-
-# Months already completed or excluded.
-declare -A SKIP_MONTHS
-
-# Already completed.
-for month in \
-    2015-07 2015-08 2015-09 \
-    2015-10 2015-11 2015-12
-do
-    SKIP_MONTHS["$month"]=1
-done
-
-# Corrupted month.
-SKIP_MONTHS["2015-03"]=1
-
-# Skip entire 2024H2.
-for month in \
-    2024-07 2024-08 2024-09 \
-    2024-10 2024-11 2024-12
-do
-    SKIP_MONTHS["$month"]=1
-done
-
-# Skip entire 2026H2.
-for month in \
-    2026-07 2026-08 2026-09 \
-    2026-10 2026-11 2026-12
-do
-    SKIP_MONTHS["$month"]=1
-done
 
 # --------------------------------------------------
 # Build task mapping from similarity_matrix.py
@@ -71,11 +40,6 @@ TASK_IDS=()
 
 for task_id in "${!ALL_MONTHS[@]}"; do
     month="${ALL_MONTHS[$task_id]}"
-
-    if [[ -n "${SKIP_MONTHS[$month]:-}" ]]; then
-        echo "Skipping task $task_id: $month"
-        continue
-    fi
 
     TASK_IDS+=("$task_id")
 done
@@ -230,10 +194,6 @@ echo "Batch size: $BATCH_SIZE"
 echo "Total batches: $NUM_BATCHES"
 
 echo ""
-echo "Excluded half-years:"
-echo "  2015H2: already completed"
-echo "  2024H2: skipped"
-echo "  2026H2: skipped"
 
 if [[ "${1:-}" == "--submit-batch" ]]; then
     if [[ -z "${2:-}" || ! "${2:-}" =~ ^[0-9]+$ ]]; then

@@ -16,9 +16,9 @@ from transformers import AutoModel, AutoTokenizer
 
 
 REDDIT_MONTHLY_DIR = "/storage/cedar/cedar0/cedarp-smussmann3-0/kmehta301/reddit_zst"
-SYNONYMS_FILE = "/storage/scratch1/8/arodrigues46/Emerging-and-New-Euphemism-Detection/drug_lists/drug_synonyms.txt"
+SYNONYMS_FILE = "/storage/scratch1/8/arodrigues46/Emerging-and-New-Euphemism-Detection/drug_lists/drug_synonyms_dea_ud.txt"
 SUBREDDIT_LIST_FILE = "/storage/scratch1/8/arodrigues46/Emerging-and-New-Euphemism-Detection/drug_lists/drug_subreddit_list.txt"
-OUTPUT_DIR = "./drug_centroid_hy/checkpoints"
+OUTPUT_DIR = "./drug_centroid_hy_II/checkpoints"
 MODEL_NAME = "bert-base-uncased"
 
 # Performance settings. BATCH_SIZE remains unchanged.

@@ -1,4 +1,3 @@
-
 #!/bin/bash
 set -euo pipefail
 
@@ -13,14 +12,17 @@ DUMP_DIR="/storage/cedar/cedar0/cedarp-smussmann3-0/kmehta301/reddit_zst"
 # Maximum tasks submitted in each array.
 BATCH_SIZE=45
 
-START_TASK=162
+# need to redo 121, 125, 130, 135-138
+# START_TASK=180
+
+# Tasks to redo
+TASK_IDS=(138)
+
+NUM_ELIGIBLE=${#TASK_IDS[@]}
+NUM_BATCHES=1
+
 ACCOUNT="gts-smussmann3"
 QOS="embers"
-
-SKIP_MONTHS=(
-    2015-01 2015-02 2015-03 2015-04 2015-05 2015-06
-    2024-07 2024-08 2024-09 2024-10 2024-11 2024-12
-)
 
 # --------------------------------------------------
 # Build original task-to-dump mapping and eligible IDs
@@ -37,35 +39,13 @@ if (( NUM_FILES == 0 )); then
     exit 1
 fi
 
-TASK_IDS=()
+# TASK_IDS=()
 
-for i in "${!dumps[@]}"; do
-    if (( i < START_TASK )); then
-        continue
-    fi
-
-    filename=$(basename "${dumps[$i]}")
-
-    if [[ "$filename" =~ ([0-9]{4}-[0-9]{2}) ]]; then
-        month="${BASH_REMATCH[1]}"
-    else
-        echo "ERROR: Could not extract month from $filename"
-        exit 1
-    fi
-
-    skip=false
-
-    for skipped_month in "${SKIP_MONTHS[@]}"; do
-        if [[ "$month" == "$skipped_month" ]]; then
-            skip=true
-            break
-        fi
-    done
-
-    if [[ "$skip" == false ]]; then
-        TASK_IDS+=("$i")
-    fi
-done
+# for i in "${!dumps[@]}"; do
+#     if (( i >= START_TASK )); then
+#         TASK_IDS+=("$i")
+#     fi
+# done
 
 NUM_ELIGIBLE=${#TASK_IDS[@]}
 
@@ -74,7 +54,7 @@ if (( NUM_ELIGIBLE == 0 )); then
     exit 1
 fi
 
-NUM_BATCHES=$(( (NUM_ELIGIBLE + BATCH_SIZE - 1) / BATCH_SIZE ))
+# NUM_BATCHES=$(( (NUM_ELIGIBLE + BATCH_SIZE - 1) / BATCH_SIZE ))
 
 # --------------------------------------------------
 # Submit final merge job
@@ -145,6 +125,7 @@ submit_batch() {
     array_job=$(sbatch --parsable \
         --job-name=drug_centroid \
         --account="$ACCOUNT" \
+        --qos="$QOS" \
         --nodes=1 \
         --ntasks-per-node=1 \
         --cpus-per-task=4 \
@@ -152,7 +133,7 @@ submit_batch() {
         --gres=gpu:1 \
         --time=8:00:00 \
         --array="$array_spec" \
-        --mail-type=FAIL \
+        --mail-type=BEGIN,END,FAIL \
         --output="logs_hy_centroids/array_%A_%a.out" \
         --wrap="
             set -euo pipefail
@@ -188,6 +169,7 @@ submit_batch() {
             --cpus-per-task=1 \
             --mem=1G \
             --time=00:05:00 \
+            --mail-type=BEGIN,END,FAIL \
             --output="logs_hy_centroids/controller_%j.out" \
             --wrap="bash $script_quoted --submit-batch $next_batch")
 
@@ -206,22 +188,27 @@ submit_batch() {
 # Main entry point
 # --------------------------------------------------
 
-echo "Found $NUM_FILES total dump files."
-echo "Starting from task $START_TASK."
-echo "Skipping half-years: 2015H1 and 2024H2."
-echo "Eligible tasks: $NUM_ELIGIBLE"
-echo "Batch size: $BATCH_SIZE"
-echo "Total batches: $NUM_BATCHES"
+echo ""
+echo "Submitting only selected tasks: ${TASK_IDS[*]}"
 
-if [[ "${1:-}" == "--submit-batch" ]]; then
-    if [[ -z "${2:-}" || ! "$2" =~ ^[0-9]+$ ]]; then
-        echo "ERROR: Expected a numeric batch index."
-        exit 1
-    fi
+submit_batch 0
 
-    submit_batch "$2"
-else
-    echo ""
-    echo "Starting automatic batch submission."
-    submit_batch 0
-fi
+# echo "Found $NUM_FILES total dump files."
+# echo "Starting from task $START_TASK."
+# echo "Processing all available half-years."
+# echo "Eligible tasks: $NUM_ELIGIBLE"
+# echo "Batch size: $BATCH_SIZE"
+# echo "Total batches: $NUM_BATCHES"
+
+# if [[ "${1:-}" == "--submit-batch" ]]; then
+#     if [[ -z "${2:-}" || ! "$2" =~ ^[0-9]+$ ]]; then
+#         echo "ERROR: Expected a numeric batch index."
+#         exit 1
+#     fi
+
+#     submit_batch "$2"
+# else
+#     echo ""
+#     echo "Starting automatic batch submission."
+#     submit_batch 0
+# fi

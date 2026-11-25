@@ -57,7 +57,7 @@ VOCAB_FILE = os.path.join(FREQ_DIR, "freq_words.csv")
 
 SUBREDDIT_LIST_FILE = "/storage/scratch1/8/arodrigues46/Emerging-and-New-Euphemism-Detection/drug_lists/drug_subreddit_list.txt"
 
-CENTROID_RESULTS_DIR = "./drug_centroid/drug_centroid_hy/centroid_results"
+CENTROID_RESULTS_DIR = "./drug_centroid/drug_centroid_hy_II/centroid_results"
 DRUG_CENTROID_PATH = os.path.join(
     CENTROID_RESULTS_DIR, "drug_centroids_by_half_year.json"
 )

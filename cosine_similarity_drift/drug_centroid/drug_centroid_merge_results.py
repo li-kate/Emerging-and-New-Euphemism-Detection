@@ -7,9 +7,9 @@ import numpy as np
 
 
 REDDIT_MONTHLY_DIR = "/storage/cedar/cedar0/cedarp-smussmann3-0/kmehta301/reddit_zst"
-SYNONYMS_FILE = "/storage/scratch1/8/arodrigues46/Emerging-and-New-Euphemism-Detection/drug_lists/drug_synonyms.txt"
-RESULTS_DIR = "./drug_centroid_hy/checkpoints"
-OUTPUT_DIR = "./drug_centroid_hy/centroid_results"
+SYNONYMS_FILE = "/storage/scratch1/8/arodrigues46/Emerging-and-New-Euphemism-Detection/drug_lists/drug_synonyms_dea_ud.txt"
+RESULTS_DIR = "./drug_centroid_hy_II/checkpoints"
+OUTPUT_DIR = "./drug_centroid_hy_II/centroid_results"
 
 OUTPUT_PATH = os.path.join(
     OUTPUT_DIR, "drug_centroids_by_half_year.json"
@@ -19,7 +19,7 @@ INPUT_PATTERN = "partial_results_*.json"
 HIDDEN_DIM = 768
 TOP_N = 10
 
-SKIP_HALF_YEARS = {"2015H1", "2024H2"}
+SKIP_HALF_YEARS = set()
 
 try:
     import orjson
@@ -100,8 +100,6 @@ def new_half_year_accumulator():
     return {
         "terms": {},
         "monthly_counts": {},
-        "drug_sum": np.zeros(HIDDEN_DIM, dtype=np.float64),
-        "drug_count": 0,
     }
 
 
@@ -241,8 +239,6 @@ def merge_partial_results(
 
                 accumulator["terms"][term]["sum_embedding"] += embedding_sum
                 accumulator["terms"][term]["count"] += count
-                accumulator["drug_sum"] += embedding_sum
-                accumulator["drug_count"] += count
                 accumulator["monthly_counts"][month] = (
                     accumulator["monthly_counts"].get(month, 0) + count
                 )
@@ -259,16 +255,36 @@ def merge_partial_results(
 
     for half_year in sorted(half_year_agg):
         accumulator = half_year_agg[half_year]
-        drug_sum = accumulator["drug_sum"]
-        drug_count = accumulator["drug_count"]
-
-        if drug_count == 0:
-            print(f"Skipping {half_year}: no embedded occurrences")
-            continue
-
-        drug_centroid = drug_sum / drug_count
+    
         term_centroids = {}
         term_counts = {}
+    
+        for term, agg in accumulator["terms"].items():
+            count = agg["count"]
+    
+            if count == 0:
+                continue
+    
+            term_counts[term] = count
+    
+            term_centroids[term] = (
+                agg["sum_embedding"] / count
+            ).tolist()
+    
+        if not term_centroids:
+            print(f"Skipping {half_year}: no embedded terms")
+            continue
+    
+        # Equal weight per term, regardless of occurrence frequency.
+        term_vectors = np.asarray(
+            list(term_centroids.values()),
+            dtype=np.float64,
+        )
+    
+        drug_sum = term_vectors.sum(axis=0)
+        drug_count = len(term_vectors)
+    
+        drug_centroid = drug_sum / drug_count
 
         for term, agg in accumulator["terms"].items():
             count = agg["count"]
@@ -286,7 +302,7 @@ def merge_partial_results(
         )
 
         stats = {
-            "embedded_occurrences": drug_count,
+            "embedded_occurrences": int(sum(term_counts.values())),
             "target_terms": len(target_words),
             "terms_with_embeddings": len(term_centroids),
             "terms_without_embeddings": len(missing_terms),
@@ -307,7 +323,7 @@ def merge_partial_results(
                     key=lambda item: (-item[1], item[0]),
                 )[:TOP_N]
             ],
-            "weighting": "equal_weight_per_embedded_occurrence",
+            "weighting": "equal_weight_per_term",
             "model": "bert-base-uncased",
             "embedding_dimension": HIDDEN_DIM,
         }
@@ -347,7 +363,7 @@ def merge_partial_results(
         "skipped_no_tokens": total_stats["skipped_no_tokens"],
         "half_years_created": sorted(output_half_years),
         "number_of_half_years": len(output_half_years),
-        "weighting": "equal_weight_per_embedded_occurrence",
+        "weighting": "equal_weight_per_term",
         "model": "bert-base-uncased",
         "embedding_dimension": HIDDEN_DIM,
     }
